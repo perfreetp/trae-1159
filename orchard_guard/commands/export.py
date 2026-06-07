@@ -3,7 +3,10 @@ import csv
 import click
 from ..core.models import DiseaseType
 from ..core.detector import get_treatment
-from ..core.store import resolve_sessions, compute_statistics, load_config
+from ..core.store import (
+    resolve_sessions, compute_statistics, compute_priority_watch,
+    load_config,
+)
 
 
 @click.command("export")
@@ -55,10 +58,10 @@ def export_command(session_id, plot, output, fmt, mode, store_dir):
             output = f"果园病害_全部.{export_fmt}"
 
     if export_fmt == "xlsx":
-        _export_xlsx(sessions, output)
+        _export_xlsx(sessions, output, config)
     else:
         if mode == "summary":
-            _export_csv_summary(sessions, output)
+            _export_csv_summary(sessions, output, config)
         else:
             _export_csv_detail(sessions, output)
 
@@ -107,6 +110,20 @@ def _collect_detail_rows(sessions):
                     "是" if det.corrected else "否",
                     det.original_disease.value if det.original_disease else "",
                 ])
+    return rows
+
+
+def _collect_detail_summary_rows(stats):
+    headers = [
+        "巡园日期", "地块编号", "品种", "病害", "检出数",
+        "病斑面积(px²)", "面积占比(%)",
+    ]
+    rows = [headers]
+    for row in stats.get("detail_summary", []):
+        rows.append([
+            row["scan_date"], row["plot_id"], row["variety"], row["disease"],
+            row["count"], row["lesion_area"], row["area_pct"],
+        ])
     return rows
 
 
@@ -166,6 +183,23 @@ def _collect_disease_summary_rows(stats):
     return rows
 
 
+def _collect_priority_watch_rows(watch):
+    headers = [
+        "地块编号", "品种", "主要病害", "最近巡园日期",
+        "发病率(%)", "面积占比(%)", "增长幅度(%)",
+        "触发原因", "防治建议", "建议复查日期",
+    ]
+    rows = [headers]
+    for w in watch:
+        if w["triggers"]:
+            rows.append([
+                w["plot_id"], w["variety"], w["primary_disease"], w["latest_date"],
+                w["incidence_rate"], w["area_pct"], w["growth"],
+                "; ".join(w["triggers"]), w["treatment"], w["recheck_date"],
+            ])
+    return rows
+
+
 def _export_csv_detail(sessions, output_path):
     rows = _collect_detail_rows(sessions)
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -175,24 +209,31 @@ def _export_csv_detail(sessions, output_path):
     click.echo(f"   明细: {len(rows)-1} 条记录")
 
 
-def _export_csv_summary(sessions, output_path):
+def _export_csv_summary(sessions, output_path, config):
     stats = compute_statistics(sessions)
-    plot_rows = _collect_plot_summary_rows(stats)
-    disease_rows = _collect_disease_summary_rows(stats)
+    watch = compute_priority_watch(sessions, config)
 
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
+        writer.writerow(["=== 巡园台账汇总 ==="])
+        for row in _collect_detail_summary_rows(stats):
+            writer.writerow(row)
+        writer.writerow([])
         writer.writerow(["=== 地块台账汇总 ==="])
-        for row in plot_rows:
+        for row in _collect_plot_summary_rows(stats):
             writer.writerow(row)
         writer.writerow([])
         writer.writerow(["=== 病害汇总 ==="])
-        for row in disease_rows:
+        for row in _collect_disease_summary_rows(stats):
             writer.writerow(row)
-    click.echo(f"   汇总: {len(plot_rows)-1} 地块 + {len(disease_rows)-1} 病害")
+        writer.writerow([])
+        writer.writerow(["=== 重点巡查清单 ==="])
+        for row in _collect_priority_watch_rows(watch):
+            writer.writerow(row)
+    click.echo(f"   汇总: 台账明细 + 地块汇总 + 病害汇总 + 重点清单")
 
 
-def _export_xlsx(sessions, output_path):
+def _export_xlsx(sessions, output_path, config):
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -203,6 +244,7 @@ def _export_xlsx(sessions, output_path):
         return
 
     stats = compute_statistics(sessions)
+    watch = compute_priority_watch(sessions, config)
     wb = Workbook()
 
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -212,10 +254,14 @@ def _export_xlsx(sessions, output_path):
         top=Side(style="thin"), bottom=Side(style="thin"),
     )
     disease_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    alert_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
 
     ws_detail = wb.active
     ws_detail.title = "明细"
     _write_sheet(ws_detail, _collect_detail_rows(sessions), header_fill, header_font, thin_border, disease_fill)
+
+    ws_ledger = wb.create_sheet("巡园台账汇总")
+    _write_sheet(ws_ledger, _collect_detail_summary_rows(stats), header_fill, header_font, thin_border, disease_fill)
 
     ws_plot = wb.create_sheet("地块汇总")
     _write_sheet(ws_plot, _collect_plot_summary_rows(stats), header_fill, header_font, thin_border)
@@ -223,12 +269,15 @@ def _export_xlsx(sessions, output_path):
     ws_disease = wb.create_sheet("病害汇总")
     _write_sheet(ws_disease, _collect_disease_summary_rows(stats), header_fill, header_font, thin_border, disease_fill)
 
+    ws_watch = wb.create_sheet("重点巡查清单")
+    watch_rows = _collect_priority_watch_rows(watch)
+    _write_sheet(ws_watch, watch_rows, header_fill, header_font, thin_border, disease_fill, alert_fill)
+
     wb.save(output_path)
-    detail_count = len(sessions)
-    click.echo(f"   明细表 + 地块汇总表 + 病害汇总表")
+    click.echo(f"   5张表: 明细 + 巡园台账汇总 + 地块汇总 + 病害汇总 + 重点巡查清单")
 
 
-def _write_sheet(ws, rows, header_fill, header_font, border, disease_fill=None):
+def _write_sheet(ws, rows, header_fill, header_font, border, disease_fill=None, alert_fill=None):
     from openpyxl.styles import Alignment as _Alignment
 
     for row_idx, row in enumerate(rows, 1):
@@ -240,13 +289,17 @@ def _write_sheet(ws, rows, header_fill, header_font, border, disease_fill=None):
                 cell.font = header_font
                 cell.fill = header_fill
 
-    if disease_fill:
+    if disease_fill or alert_fill:
         for row_idx in range(2, len(rows) + 1):
             for col_idx in range(1, len(rows[0]) + 1):
                 header = rows[0][col_idx - 1] if col_idx <= len(rows[0]) else ""
                 val = ws.cell(row=row_idx, column=col_idx).value
-                if header in ("病害类型", "病害名称", "主要病害") and val and val not in ("健康", "", "-"):
-                    ws.cell(row=row_idx, column=col_idx).fill = disease_fill
+                if not val:
+                    continue
+                if header in ("病害类型", "病害名称", "主要病害", "病害") and val not in ("健康", "", "-"):
+                    ws.cell(row=row_idx, column=col_idx).fill = disease_fill or alert_fill
+                if header == "触发原因" and val:
+                    ws.cell(row=row_idx, column=col_idx).fill = alert_fill or disease_fill
 
     for col in ws.columns:
         max_length = 0

@@ -1,0 +1,50 @@
+{
+  "681070c3": {
+    "id": "681070c3",
+    "created_at": "2026-06-08T07:50:28",
+    "source_dir": "E:\\trae-bz\\TraeProjects\\1159\\test_orchard",
+    "variety": "",
+    "plot_id": "",
+    "scan_date": "2024-06-01",
+    "total_images": 4,
+    "disease_count": 3,
+    "healthy_count": 1,
+    "blurry_count": 4,
+    "image_plots": [
+      "A1",
+      "B2"
+    ]
+  },
+  "e68ad668": {
+    "id": "e68ad668",
+    "created_at": "2026-06-08T07:50:36",
+    "source_dir": "E:\\trae-bz\\TraeProjects\\1159\\test_orchard",
+    "variety": "",
+    "plot_id": "",
+    "scan_date": "2024-06-10",
+    "total_images": 4,
+    "disease_count": 2,
+    "healthy_count": 2,
+    "blurry_count": 4,
+    "image_plots": [
+      "A1",
+      "B2"
+    ]
+  },
+  "644828e4": {
+    "id": "644828e4",
+    "created_at": "2026-06-08T07:50:46",
+    "source_dir": "E:\\trae-bz\\TraeProjects\\1159\\test_orchard",
+    "variety": "",
+    "plot_id": "",
+    "scan_date": "2024-06-20",
+    "total_images": 4,
+    "disease_count": 3,
+    "healthy_count": 1,
+    "blurry_count": 4,
+    "image_plots": [
+      "A1",
+      "B2"
+    ]
+  }
+}

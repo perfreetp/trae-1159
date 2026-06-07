@@ -1,6 +1,9 @@
 import click
-from ..core.models import DiseaseType, DISEASE_NAMES_CN
-from ..core.store import load_session, update_session, list_sessions
+from ..core.models import DiseaseType, DISEASE_NAMES_CN, AuditLogEntry, AuditChange
+from ..core.store import (
+    load_session, update_session, list_sessions,
+    save_audit_log, load_audit_log, undo_last_audit,
+)
 
 
 @click.command("label")
@@ -13,10 +16,13 @@ from ..core.store import load_session, update_session, list_sessions
 @click.option("--filter-confidence", "filter_conf", default="", help="筛选置信度区间 (如 0-0.4)")
 @click.option("--set-disease", "set_disease", default="", help="批量设置病害类型 (如 锈病、未知)")
 @click.option("--set-confidence", "set_confidence", type=float, default=None, help="批量设置置信度")
+@click.option("--history", is_flag=True, help="查看修改记录")
+@click.option("--undo", is_flag=True, help="撤回最近一次批量修正")
 @click.option("--store-dir", default="", help="数据存储目录")
 def label_command(
     session_id, image_idx, list_only, show_all, img_range,
-    filter_disease, filter_conf, set_disease, set_confidence, store_dir
+    filter_disease, filter_conf, set_disease, set_confidence,
+    history, undo, store_dir
 ):
     """查看和修正病害识别结果"""
 
@@ -43,6 +49,14 @@ def label_command(
         click.echo(f"❌ 未找到会话: {session_id}")
         return
 
+    if history:
+        _show_history(session_id, store_dir)
+        return
+
+    if undo:
+        _do_undo(session_id, store_dir)
+        return
+
     if show_all:
         _show_all_results(sess)
         return
@@ -61,6 +75,37 @@ def label_command(
         _label_single(sess, image_idx, store_dir)
     else:
         _interactive_label(sess, store_dir)
+
+
+def _show_history(session_id, store_dir):
+    log = load_audit_log(store_dir or None)
+    session_log = [e for e in log if e.session_id == session_id]
+    if not session_log:
+        click.echo(f"📭 会话 {session_id} 暂无修改记录")
+        return
+    click.echo(f"\n📝 会话 {session_id} 修改记录:")
+    click.echo("-" * 70)
+    for entry in reversed(session_log):
+        click.echo(f"  [{entry.id}] {entry.timestamp}")
+        for c in entry.changes:
+            conf_change = f" 置信度={c.old_confidence:.1%}→{c.new_confidence:.1%}" if c.old_confidence != c.new_confidence else ""
+            click.echo(f"    图片[{c.image_idx}] {c.image_name}: {c.old_disease}→{c.new_disease}{conf_change}")
+        click.echo()
+
+
+def _do_undo(session_id, store_dir):
+    entry = undo_last_audit(session_id, store_dir or None)
+    if not entry:
+        click.echo(f"❌ 会话 {session_id} 没有可撤回的修改记录")
+        return
+    click.echo(f"✅ 已撤回修改 [{entry.id}] {entry.timestamp}")
+    for c in entry.changes:
+        click.echo(f"   图片[{c.image_idx}] {c.image_name}: {c.new_disease}→{c.old_disease}")
+
+    sess = load_session(session_id, store_dir or None)
+    if sess:
+        sess.recalculate_counts()
+        click.echo(f"   当前统计: 病害={sess.disease_count}  健康={sess.healthy_count}  总图片={sess.total_images}")
 
 
 def _show_all_results(sess):
@@ -160,11 +205,25 @@ def _prompt_correction(sess, img_idx, store_dir):
         click.echo("❌ 序号无效")
         return
 
-    _apply_disease_change(img.detections[det_idx])
+    det = img.detections[det_idx]
+    old_disease = det.disease.value
+    old_conf = det.confidence
+    _apply_disease_change(det)
+
+    change = AuditChange(
+        image_idx=img_idx,
+        image_name=img.file_name,
+        det_idx=det_idx,
+        old_disease=old_disease,
+        new_disease=det.disease.value,
+        old_confidence=old_conf,
+        new_confidence=det.confidence,
+    )
+    entry = AuditLogEntry(session_id=sess.id, changes=[change])
+    save_audit_log(entry, store_dir or None)
 
     update_session(sess, store_dir or None)
-    det = img.detections[det_idx]
-    click.echo(f"✅ 已修正: {det.original_disease.value if det.original_disease else '?'} → {det.disease.value} ({det.confidence:.0%})")
+    click.echo(f"✅ 已修正: {old_disease} → {det.disease.value} ({det.confidence:.0%})")
 
 
 def _apply_disease_change(det):
@@ -259,11 +318,14 @@ def _batch_modify(sess, img_range, filter_disease, filter_conf, set_disease, set
     indices = _parse_range(img_range, len(sess.images))
     conf_low, conf_high = _parse_conf_range(filter_conf)
     modified = 0
+    changes = []
 
     for idx in indices:
         img = sess.images[idx]
-        for det in img.detections:
+        for det_idx, det in enumerate(img.detections):
             if _match_filters(det, filter_disease, conf_low, conf_high):
+                old_disease = det.disease.value
+                old_conf = det.confidence
                 if target_disease:
                     if not det.corrected:
                         det.original_disease = det.disease
@@ -271,14 +333,27 @@ def _batch_modify(sess, img_range, filter_disease, filter_conf, set_disease, set
                     det.corrected = True
                 if set_confidence is not None:
                     det.confidence = max(0.0, min(1.0, set_confidence))
+                changes.append(AuditChange(
+                    image_idx=idx,
+                    image_name=img.file_name,
+                    det_idx=det_idx,
+                    old_disease=old_disease,
+                    new_disease=det.disease.value,
+                    old_confidence=old_conf,
+                    new_confidence=det.confidence,
+                ))
                 modified += 1
 
     if modified == 0:
         click.echo("⚠️  没有匹配的检测结果")
         return
 
+    entry = AuditLogEntry(session_id=sess.id, changes=changes)
+    save_audit_log(entry, store_dir or None)
+
     update_session(sess, store_dir or None)
-    click.echo(f"✅ 已批量修正 {modified} 条检测结果")
+    click.echo(f"✅ 已批量修正 {modified} 条检测结果 (记录ID: {entry.id})")
 
     sess.recalculate_counts()
     click.echo(f"   当前统计: 病害={sess.disease_count}  健康={sess.healthy_count}  总图片={sess.total_images}")
+    click.echo(f"   使用 --undo 可撤回此次修改")

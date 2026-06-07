@@ -1,0 +1,11 @@
+{
+  "confidence_threshold": 0.5,
+  "blur_threshold": 100.0,
+  "default_variety": "",
+  "default_plot": "",
+  "export_format": "xlsx",
+  "store_dir": "test_store",
+  "alert_incidence_rate": 50.0,
+  "alert_area_ratio": 3.0,
+  "alert_growth_rate": 10.0
+}

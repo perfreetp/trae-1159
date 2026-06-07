@@ -1,0 +1,18 @@
+[
+  {
+    "id": "fb5aafaa48",
+    "timestamp": "2026-06-08T07:53:40",
+    "session_id": "e68ad668",
+    "changes": [
+      {
+        "image_idx": 1,
+        "image_name": "brown_leaf.jpg",
+        "det_idx": 0,
+        "old_disease": "叶斑病",
+        "new_disease": "健康",
+        "old_confidence": 0.95,
+        "new_confidence": 0.9
+      }
+    ]
+  }
+]

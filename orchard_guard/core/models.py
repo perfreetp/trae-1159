@@ -2,7 +2,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import date, datetime
 from typing import List, Optional, Dict, Tuple
 from enum import Enum
-import json, uuid
+import json, uuid, copy
 
 
 class DiseaseType(Enum):
@@ -218,6 +218,9 @@ class AppConfig:
     default_plot: str = ""
     export_format: str = "xlsx"
     store_dir: str = ""
+    alert_incidence_rate: float = 30.0
+    alert_area_ratio: float = 5.0
+    alert_growth_rate: float = 15.0
 
     def to_dict(self) -> dict:
         return {
@@ -227,6 +230,9 @@ class AppConfig:
             "default_plot": self.default_plot,
             "export_format": self.export_format,
             "store_dir": self.store_dir,
+            "alert_incidence_rate": self.alert_incidence_rate,
+            "alert_area_ratio": self.alert_area_ratio,
+            "alert_growth_rate": self.alert_growth_rate,
         }
 
     @staticmethod
@@ -238,4 +244,68 @@ class AppConfig:
             default_plot=d.get("default_plot", ""),
             export_format=d.get("export_format", "xlsx"),
             store_dir=d.get("store_dir", ""),
+            alert_incidence_rate=d.get("alert_incidence_rate", 30.0),
+            alert_area_ratio=d.get("alert_area_ratio", 5.0),
+            alert_growth_rate=d.get("alert_growth_rate", 15.0),
+        )
+
+
+@dataclass
+class AuditChange:
+    image_idx: int = 0
+    image_name: str = ""
+    det_idx: int = 0
+    old_disease: str = ""
+    new_disease: str = ""
+    old_confidence: float = 0.0
+    new_confidence: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "image_idx": self.image_idx,
+            "image_name": self.image_name,
+            "det_idx": self.det_idx,
+            "old_disease": self.old_disease,
+            "new_disease": self.new_disease,
+            "old_confidence": round(self.old_confidence, 4),
+            "new_confidence": round(self.new_confidence, 4),
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "AuditChange":
+        return AuditChange(
+            image_idx=d.get("image_idx", 0),
+            image_name=d.get("image_name", ""),
+            det_idx=d.get("det_idx", 0),
+            old_disease=d.get("old_disease", ""),
+            new_disease=d.get("new_disease", ""),
+            old_confidence=d.get("old_confidence", 0.0),
+            new_confidence=d.get("new_confidence", 0.0),
+        )
+
+
+@dataclass
+class AuditLogEntry:
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
+    timestamp: str = field(
+        default_factory=lambda: datetime.now().isoformat(timespec="seconds")
+    )
+    session_id: str = ""
+    changes: List[AuditChange] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "timestamp": self.timestamp,
+            "session_id": self.session_id,
+            "changes": [c.to_dict() for c in self.changes],
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "AuditLogEntry":
+        return AuditLogEntry(
+            id=d.get("id", uuid.uuid4().hex[:10]),
+            timestamp=d.get("timestamp", ""),
+            session_id=d.get("session_id", ""),
+            changes=[AuditChange.from_dict(c) for c in d.get("changes", [])],
         )

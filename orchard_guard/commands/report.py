@@ -1,7 +1,9 @@
 import click
 from ..core.models import DiseaseType
 from ..core.detector import get_treatment
-from ..core.store import resolve_sessions, compute_statistics
+from ..core.store import (
+    resolve_sessions, compute_statistics, compute_priority_watch, load_config,
+)
 
 
 @click.command("report")
@@ -24,6 +26,8 @@ def report_command(session_id, plot, store_dir):
         return
 
     stats = compute_statistics(sessions)
+    config = load_config(store_dir or None)
+    watch = compute_priority_watch(sessions, config)
 
     click.echo("\n" + "=" * 70)
     click.echo("📋 果园病害诊断报告")
@@ -36,13 +40,32 @@ def report_command(session_id, plot, store_dir):
     click.echo(f"   健康图片: {stats['total_healthy']}")
     click.echo(f"   模糊照片: {stats['total_blurry']}")
 
+    _print_detail_summary(stats)
     _print_disease_summary(stats)
     _print_plot_summary(stats)
     _print_variety_summary(stats)
+    _print_priority_watch(watch, config)
     _print_treatment_list(stats)
 
     click.echo("=" * 70)
     click.echo("报告生成完毕")
+
+
+def _print_detail_summary(stats):
+    detail = stats.get("detail_summary", [])
+    if not detail:
+        return
+
+    click.echo("\n" + "-" * 70)
+    click.echo("📋 巡园台账明细 (日期×地块×品种×病害):")
+    click.echo(f"   {'巡园日期':<12} {'地块':<8} {'品种':<10} {'病害':<8} {'检出数':>6} {'病斑面积':>12} {'面积占比':>8}")
+    click.echo("   " + "-" * 70)
+    for row in detail:
+        la_str = f"{row['lesion_area']:,}" if row['lesion_area'] > 0 else "-"
+        click.echo(
+            f"   {row['scan_date']:<12} {row['plot_id']:<8} {row['variety']:<10} "
+            f"{row['disease']:<8} {row['count']:>6} {la_str:>12} {row['area_pct']:>7.2f}%"
+        )
 
 
 def _print_disease_summary(stats):
@@ -123,13 +146,32 @@ def _print_variety_summary(stats):
             click.echo(f"     • {dname}: {count} 处")
 
 
+def _print_priority_watch(watch, config):
+    triggered = [w for w in watch if w["triggers"]]
+    if not triggered:
+        return
+
+    click.echo("\n" + "-" * 70)
+    click.echo("🚨 重点巡查地块:")
+    click.echo(f"   (预警阈值: 发病率≥{config.alert_incidence_rate}%  面积占比≥{config.alert_area_ratio}%  增长≥{config.alert_growth_rate}%)")
+    click.echo()
+    for w in triggered:
+        click.echo(f"   📍 地块 {w['plot_id']}  品种={w['variety']}")
+        click.echo(f"      主要病害: {w['primary_disease']}  发病率={w['incidence_rate']}%  面积占比={w['area_pct']}%  增长={w['growth']:+.1f}%")
+        click.echo(f"      触发原因: {'; '.join(w['triggers'])}")
+        click.echo(f"      防治建议: {w['treatment']}")
+        if w["recheck_date"]:
+            click.echo(f"      建议复查日期: {w['recheck_date']}")
+        click.echo()
+
+
 def _print_treatment_list(stats):
     all_disease_stats = stats["all_disease_stats"]
     plot_stats = stats["plot_stats"]
     if not all_disease_stats:
         return
 
-    click.echo("\n" + "-" * 70)
+    click.echo("-" * 70)
     click.echo("💊 防治建议清单:")
     click.echo()
     for dname in sorted(all_disease_stats.keys()):

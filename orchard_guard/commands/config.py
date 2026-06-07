@@ -9,13 +9,17 @@ from ..core.store import load_config, save_config, compute_summary, list_session
 @click.option("--default-variety", type=str, default=None, help="设置默认果树品种")
 @click.option("--default-plot", type=str, default=None, help="设置默认地块编号")
 @click.option("--export-format", type=click.Choice(["xlsx", "csv"]), default=None, help="设置默认导出格式")
+@click.option("--alert-incidence", type=float, default=None, help="预警: 发病率阈值(%)")
+@click.option("--alert-area", type=float, default=None, help="预警: 面积占比阈值(%)")
+@click.option("--alert-growth", type=float, default=None, help="预警: 增长幅度阈值(%)")
 @click.option("--store-dir", default="", help="数据存储目录")
 @click.option("--show", is_flag=True, help="显示当前配置")
 @click.option("--summary", is_flag=True, help="打印处理摘要")
 @click.option("--reset", is_flag=True, help="恢复默认配置")
 def config_command(
     confidence, blur_threshold, default_variety, default_plot,
-    export_format, store_dir, show, summary, reset
+    export_format, alert_incidence, alert_area, alert_growth,
+    store_dir, show, summary, reset
 ):
     """保存常用阈值，查看配置，打印处理摘要"""
 
@@ -49,6 +53,18 @@ def config_command(
         config.export_format = export_format
         changed = True
         click.echo(f"✅ 默认导出格式已设置为: {config.export_format}")
+    if alert_incidence is not None:
+        config.alert_incidence_rate = alert_incidence
+        changed = True
+        click.echo(f"✅ 预警发病率阈值已设置为: {config.alert_incidence_rate}%")
+    if alert_area is not None:
+        config.alert_area_ratio = alert_area
+        changed = True
+        click.echo(f"✅ 预警面积占比阈值已设置为: {config.alert_area_ratio}%")
+    if alert_growth is not None:
+        config.alert_growth_rate = alert_growth
+        changed = True
+        click.echo(f"✅ 预警增长幅度阈值已设置为: {config.alert_growth_rate}%")
 
     if changed:
         save_config(config, store_dir or None)
@@ -68,6 +84,10 @@ def _show_config(config):
     click.echo(f"   默认地块: {config.default_plot or '(未设置)'}")
     click.echo(f"   导出格式: {config.export_format}")
     click.echo(f"   数据目录: {config.store_dir}")
+    click.echo(f"   预警阈值:")
+    click.echo(f"     发病率≥{config.alert_incidence_rate}%")
+    click.echo(f"     面积占比≥{config.alert_area_ratio}%")
+    click.echo(f"     增长幅度≥{config.alert_growth_rate}%")
 
 
 def _print_summary(store_dir):
@@ -92,7 +112,7 @@ def _print_summary(store_dir):
         click.echo("\n   最近扫描:")
         for r in recent:
             click.echo(
-                f"     • {r['id']}  {r.get('created_at', '')[:10]}  "
+                f"     • {r['id']}  {r.get('scan_date', r.get('created_at', '')[:10])}  "
                 f"品种={r.get('variety', '-')}  地块={r.get('plot_id', '-')}  "
                 f"图片={r.get('total_images', 0)}"
             )

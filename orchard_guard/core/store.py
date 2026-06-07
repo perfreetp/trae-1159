@@ -1,13 +1,17 @@
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Tuple
 from collections import defaultdict
-from .models import ScanSession, ImageRecord, AppConfig, DiseaseType
+from .models import (
+    ScanSession, ImageRecord, AppConfig, DiseaseType,
+    AuditLogEntry, AuditChange, DISEASE_NAMES_CN,
+)
 
 _DEFAULT_STORE = os.path.join(os.path.expanduser("~"), ".orchard_guard")
 _SESSIONS_FILE = "sessions.json"
 _CONFIG_FILE = "config.json"
+_AUDIT_FILE = "audit_log.json"
 
 
 def _ensure_store(store_dir: Optional[str] = None) -> str:
@@ -130,8 +134,7 @@ def filter_images_by_plot(
     for sess in sessions:
         matched = [img for img in sess.images if img.plot_id == plot_id]
         if matched:
-            from .models import ScanSession as _S
-            fs = _S(
+            fs = ScanSession(
                 id=sess.id,
                 created_at=sess.created_at,
                 source_dir=sess.source_dir,
@@ -153,7 +156,6 @@ def resolve_sessions(
     store_dir: Optional[str] = None,
 ) -> Tuple[List[ScanSession], bool]:
     sessions = []
-    ok = True
 
     if session_id:
         sess = load_session(session_id, store_dir)
@@ -217,6 +219,8 @@ def compute_statistics(sessions: List[ScanSession]) -> Dict:
     plot_healthy_images = defaultdict(int)
     scan_dates = set()
 
+    detail_rows = []
+
     for sess in sessions:
         sd = sess.scan_date or sess.created_at[:10]
         scan_dates.add(sd)
@@ -237,6 +241,8 @@ def compute_statistics(sessions: List[ScanSession]) -> Dict:
             if img.is_healthy():
                 plot_healthy_images[pid] += 1
 
+            img_diseases = defaultdict(int)
+            img_lesion_area = 0
             for det in img.detections:
                 if det.disease not in (DiseaseType.HEALTHY, DiseaseType.UNKNOWN):
                     dname = det.disease.value
@@ -244,11 +250,60 @@ def compute_statistics(sessions: List[ScanSession]) -> Dict:
                     all_confidence[dname].append(det.confidence)
                     plot_stats[pid][dname] += 1
                     variety_stats[var][dname] += 1
+                    img_diseases[dname] += 1
                     if det.bbox and img_area > 0:
                         bbox_area = det.bbox.area()
                         disease_lesion_area[dname] += bbox_area
                         disease_image_area[dname] += img_area
                         plot_lesion_area[pid][dname] += bbox_area
+                        img_lesion_area += bbox_area
+
+            if img_diseases:
+                for dname, count in img_diseases.items():
+                    la = 0
+                    for det2 in img.detections:
+                        if det2.disease.value == dname and det2.bbox:
+                            la += det2.bbox.area()
+                    detail_rows.append({
+                        "scan_date": sd,
+                        "plot_id": pid,
+                        "variety": var,
+                        "disease": dname,
+                        "count": count,
+                        "lesion_area": la,
+                        "image_area": img_area,
+                    })
+            else:
+                detail_rows.append({
+                    "scan_date": sd,
+                    "plot_id": pid,
+                    "variety": var,
+                    "disease": "健康",
+                    "count": 1,
+                    "lesion_area": 0,
+                    "image_area": img_area,
+                })
+
+    detail_agg = defaultdict(lambda: {"count": 0, "lesion_area": 0, "image_area": 0})
+    for row in detail_rows:
+        key = (row["scan_date"], row["plot_id"], row["variety"], row["disease"])
+        detail_agg[key]["count"] += row["count"]
+        detail_agg[key]["lesion_area"] += row["lesion_area"]
+        detail_agg[key]["image_area"] += row["image_area"]
+
+    detail_summary = []
+    for (sd, pid, var, dname), vals in sorted(detail_agg.items()):
+        area_pct = vals["lesion_area"] / max(1, vals["image_area"]) * 100 if vals["image_area"] > 0 else 0
+        detail_summary.append({
+            "scan_date": sd,
+            "plot_id": pid,
+            "variety": var,
+            "disease": dname,
+            "count": vals["count"],
+            "lesion_area": vals["lesion_area"],
+            "image_area": vals["image_area"],
+            "area_pct": round(area_pct, 2),
+        })
 
     return {
         "total_images": total_images,
@@ -267,7 +322,154 @@ def compute_statistics(sessions: List[ScanSession]) -> Dict:
         "plot_disease_images": dict(plot_disease_images),
         "plot_healthy_images": dict(plot_healthy_images),
         "scan_dates": sorted(scan_dates),
+        "detail_summary": detail_summary,
     }
+
+
+def compute_priority_watch(
+    sessions: List[ScanSession], config: AppConfig
+) -> List[Dict]:
+    from .detector import get_treatment
+
+    if len(sessions) < 1:
+        return []
+
+    plot_data = defaultdict(lambda: {
+        "total": 0, "disease": 0, "lesion_area": 0, "image_area": 0,
+        "variety": "", "latest_date": "", "diseases": defaultdict(int),
+    })
+
+    for sess in sessions:
+        sd = sess.scan_date or sess.created_at[:10]
+        for img in sess.images:
+            pid = img.plot_id or sess.plot_id or "未知地块"
+            var = img.variety or sess.variety or "未知品种"
+            pd = plot_data[pid]
+            pd["total"] += 1
+            pd["latest_date"] = max(pd["latest_date"], sd)
+            if not pd["variety"]:
+                pd["variety"] = var
+            img_area = img.image_area()
+            if img_area > 0:
+                pd["image_area"] += img_area
+            if img.has_disease():
+                pd["disease"] += 1
+                pd["lesion_area"] += img.total_lesion_area()
+            for det in img.detections:
+                if det.disease not in (DiseaseType.HEALTHY, DiseaseType.UNKNOWN):
+                    pd["diseases"][det.disease.value] += 1
+
+    watch = []
+    for pid, pd in plot_data.items():
+        rate = pd["disease"] / max(1, pd["total"]) * 100
+        area_pct = pd["lesion_area"] / max(1, pd["image_area"]) * 100 if pd["image_area"] > 0 else 0
+        primary = max(pd["diseases"], key=pd["diseases"].get) if pd["diseases"] else "-"
+        treatment = get_treatment(primary) if primary != "-" else "-"
+
+        growth = 0.0
+        if len(sessions) >= 2:
+            first = sessions[0]
+            last = sessions[-1]
+            first_rate = first.disease_count / max(1, first.total_images) * 100
+            last_rate = last.disease_count / max(1, last.total_images) * 100
+            growth = last_rate - first_rate
+
+        triggers = []
+        if rate >= config.alert_incidence_rate:
+            triggers.append(f"发病率{rate:.1f}%≥{config.alert_incidence_rate}%")
+        if area_pct >= config.alert_area_ratio:
+            triggers.append(f"面积占比{area_pct:.2f}%≥{config.alert_area_ratio}%")
+        if growth >= config.alert_growth_rate:
+            triggers.append(f"增长率{growth:+.1f}%≥{config.alert_growth_rate}%")
+
+        risk_score = 0
+        if triggers:
+            risk_score = rate + area_pct * 2 + growth
+            if rate >= config.alert_incidence_rate:
+                risk_score += 20
+            if area_pct >= config.alert_area_ratio:
+                risk_score += 15
+            if growth >= config.alert_growth_rate:
+                risk_score += 25
+
+        try:
+            from datetime import datetime as _dt
+            recheck = (_dt.strptime(pd["latest_date"], "%Y-%m-%d") + timedelta(days=7)).strftime("%Y-%m-%d")
+        except Exception:
+            recheck = ""
+
+        watch.append({
+            "plot_id": pid,
+            "variety": pd["variety"],
+            "primary_disease": primary,
+            "latest_date": pd["latest_date"],
+            "incidence_rate": round(rate, 1),
+            "area_pct": round(area_pct, 2),
+            "growth": round(growth, 1),
+            "triggers": triggers,
+            "risk_score": risk_score,
+            "treatment": treatment,
+            "recheck_date": recheck,
+        })
+
+    watch.sort(key=lambda x: -x["risk_score"])
+    return watch
+
+
+def save_audit_log(entry: AuditLogEntry, store_dir: Optional[str] = None):
+    d = _ensure_store(store_dir)
+    log_path = os.path.join(d, _AUDIT_FILE)
+    log = []
+    if os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8") as f:
+            log = json.load(f)
+    log.append(entry.to_dict())
+    with open(log_path, "w", encoding="utf-8") as f:
+        json.dump(log, f, ensure_ascii=False, indent=2)
+
+
+def load_audit_log(store_dir: Optional[str] = None) -> List[AuditLogEntry]:
+    d = _ensure_store(store_dir)
+    log_path = os.path.join(d, _AUDIT_FILE)
+    if not os.path.exists(log_path):
+        return []
+    with open(log_path, "r", encoding="utf-8") as f:
+        log = json.load(f)
+    return [AuditLogEntry.from_dict(e) for e in log]
+
+
+def undo_last_audit(session_id: str, store_dir: Optional[str] = None) -> Optional[AuditLogEntry]:
+    log = load_audit_log(store_dir)
+    target_idx = None
+    for i in range(len(log) - 1, -1, -1):
+        if log[i].session_id == session_id:
+            target_idx = i
+            break
+    if target_idx is None:
+        return None
+
+    entry = log[target_idx]
+    sess = load_session(session_id, store_dir)
+    if not sess:
+        return None
+
+    for change in entry.changes:
+        if change.image_idx < len(sess.images):
+            img = sess.images[change.image_idx]
+            if change.det_idx < len(img.detections):
+                det = img.detections[change.det_idx]
+                det.disease = DISEASE_NAMES_CN.get(change.old_disease, DiseaseType.UNKNOWN)
+                det.confidence = change.old_confidence
+                det.corrected = False
+                det.original_disease = None
+
+    update_session(sess, store_dir)
+    log.pop(target_idx)
+    d = _ensure_store(store_dir)
+    log_path = os.path.join(d, _AUDIT_FILE)
+    with open(log_path, "w", encoding="utf-8") as f:
+        json.dump([e.to_dict() for e in log], f, ensure_ascii=False, indent=2)
+    return entry
 
 
 def compute_summary(store_dir: Optional[str] = None) -> Dict:
