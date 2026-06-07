@@ -1,7 +1,8 @@
 import os
 import json
 from datetime import datetime
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
+from collections import defaultdict
 from .models import ScanSession, ImageRecord, AppConfig, DiseaseType
 
 _DEFAULT_STORE = os.path.join(os.path.expanduser("~"), ".orchard_guard")
@@ -142,6 +143,131 @@ def filter_images_by_plot(
             fs.recalculate_counts()
             filtered.append(fs)
     return filtered
+
+
+def resolve_sessions(
+    session_id: str = "",
+    plot: str = "",
+    from_date: str = "",
+    to_date: str = "",
+    store_dir: Optional[str] = None,
+) -> Tuple[List[ScanSession], bool]:
+    sessions = []
+    ok = True
+
+    if session_id:
+        sess = load_session(session_id, store_dir)
+        if not sess:
+            return [], False
+        sess.recalculate_counts()
+        if plot:
+            filtered = filter_images_by_plot([sess], plot)
+            if not filtered:
+                return [], False
+            sessions = filtered
+        else:
+            sessions = [sess]
+    elif plot and from_date and to_date:
+        by_date = get_sessions_by_date_range(from_date, to_date, store_dir)
+        for s in by_date:
+            s.recalculate_counts()
+        sessions = filter_images_by_plot(by_date, plot)
+        if not sessions:
+            return [], False
+    elif plot:
+        by_plot = get_sessions_by_plot(plot, store_dir)
+        for s in by_plot:
+            s.recalculate_counts()
+        sessions = filter_images_by_plot(by_plot, plot)
+        if not sessions:
+            return [], False
+    elif from_date and to_date:
+        sessions = get_sessions_by_date_range(from_date, to_date, store_dir)
+        for s in sessions:
+            s.recalculate_counts()
+    else:
+        sessions_meta = list_sessions(store_dir)
+        if not sessions_meta:
+            return [], False
+        for meta in sessions_meta:
+            s = load_session(meta["id"], store_dir)
+            if s:
+                s.recalculate_counts()
+                sessions.append(s)
+
+    sessions.sort(key=lambda s: s.scan_date or s.created_at[:10])
+    return sessions, True
+
+
+def compute_statistics(sessions: List[ScanSession]) -> Dict:
+    total_images = 0
+    total_disease = 0
+    total_healthy = 0
+    total_blurry = 0
+    all_disease_stats = defaultdict(int)
+    all_confidence = defaultdict(list)
+    plot_stats = defaultdict(lambda: defaultdict(int))
+    variety_stats = defaultdict(lambda: defaultdict(int))
+    plot_lesion_area = defaultdict(lambda: defaultdict(int))
+    plot_image_area = defaultdict(int)
+    disease_lesion_area = defaultdict(int)
+    disease_image_area = defaultdict(int)
+    plot_total_images = defaultdict(int)
+    plot_disease_images = defaultdict(int)
+    plot_healthy_images = defaultdict(int)
+    scan_dates = set()
+
+    for sess in sessions:
+        sd = sess.scan_date or sess.created_at[:10]
+        scan_dates.add(sd)
+        total_images += sess.total_images
+        total_disease += sess.disease_count
+        total_healthy += sess.healthy_count
+        total_blurry += sess.blurry_count
+
+        for img in sess.images:
+            pid = img.plot_id or sess.plot_id or "未知地块"
+            var = img.variety or sess.variety or "未知品种"
+            img_area = img.image_area()
+            plot_total_images[pid] += 1
+            if img_area > 0:
+                plot_image_area[pid] += img_area
+            if img.has_disease():
+                plot_disease_images[pid] += 1
+            if img.is_healthy():
+                plot_healthy_images[pid] += 1
+
+            for det in img.detections:
+                if det.disease not in (DiseaseType.HEALTHY, DiseaseType.UNKNOWN):
+                    dname = det.disease.value
+                    all_disease_stats[dname] += 1
+                    all_confidence[dname].append(det.confidence)
+                    plot_stats[pid][dname] += 1
+                    variety_stats[var][dname] += 1
+                    if det.bbox and img_area > 0:
+                        bbox_area = det.bbox.area()
+                        disease_lesion_area[dname] += bbox_area
+                        disease_image_area[dname] += img_area
+                        plot_lesion_area[pid][dname] += bbox_area
+
+    return {
+        "total_images": total_images,
+        "total_disease": total_disease,
+        "total_healthy": total_healthy,
+        "total_blurry": total_blurry,
+        "all_disease_stats": dict(all_disease_stats),
+        "all_confidence": dict(all_confidence),
+        "plot_stats": {k: dict(v) for k, v in plot_stats.items()},
+        "variety_stats": {k: dict(v) for k, v in variety_stats.items()},
+        "plot_lesion_area": {k: dict(v) for k, v in plot_lesion_area.items()},
+        "plot_image_area": dict(plot_image_area),
+        "disease_lesion_area": dict(disease_lesion_area),
+        "disease_image_area": dict(disease_image_area),
+        "plot_total_images": dict(plot_total_images),
+        "plot_disease_images": dict(plot_disease_images),
+        "plot_healthy_images": dict(plot_healthy_images),
+        "scan_dates": sorted(scan_dates),
+    }
 
 
 def compute_summary(store_dir: Optional[str] = None) -> Dict:

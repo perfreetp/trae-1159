@@ -1,15 +1,9 @@
 import os
 import csv
 import click
-from collections import defaultdict
 from ..core.models import DiseaseType
-from ..core.store import (
-    load_session,
-    list_sessions,
-    get_sessions_by_plot,
-    filter_images_by_plot,
-    load_config,
-)
+from ..core.detector import get_treatment
+from ..core.store import resolve_sessions, compute_statistics, load_config
 
 
 @click.command("export")
@@ -24,15 +18,32 @@ from ..core.store import (
     default=None,
     help="导出格式",
 )
+@click.option(
+    "--mode",
+    "-m",
+    type=click.Choice(["detail", "summary"]),
+    default="detail",
+    help="csv 导出模式: detail=明细, summary=汇总",
+)
 @click.option("--store-dir", default="", help="数据存储目录")
-def export_command(session_id, plot, output, fmt, store_dir):
+def export_command(session_id, plot, output, fmt, mode, store_dir):
     """按地块导出表格"""
 
     config = load_config(store_dir or None)
     export_fmt = fmt or config.export_format
 
-    sessions = _resolve_sessions(session_id, plot, store_dir)
-    if not sessions:
+    sessions, ok = resolve_sessions(
+        session_id=session_id, plot=plot, store_dir=store_dir or None
+    )
+    if not ok or not sessions:
+        if session_id and plot:
+            click.echo(f"❌ 会话 {session_id} 中没有地块 {plot} 的图片")
+        elif session_id:
+            click.echo(f"❌ 未找到会话: {session_id}")
+        elif plot:
+            click.echo(f"❌ 地块 {plot} 无可用记录")
+        else:
+            click.echo("📭 暂无扫描会话")
         return
 
     if not output:
@@ -43,52 +54,18 @@ def export_command(session_id, plot, output, fmt, store_dir):
         else:
             output = f"果园病害_全部.{export_fmt}"
 
-    rows = _collect_rows(sessions)
-
     if export_fmt == "xlsx":
-        _export_xlsx(rows, output)
+        _export_xlsx(sessions, output)
     else:
-        _export_csv(rows, output)
+        if mode == "summary":
+            _export_csv_summary(sessions, output)
+        else:
+            _export_csv_detail(sessions, output)
 
-    click.echo(f"✅ 已导出 {len(rows)-1} 条记录到: {os.path.abspath(output)}")
-
-
-def _resolve_sessions(session_id, plot, store_dir):
-    if session_id:
-        sess = load_session(session_id, store_dir or None)
-        if not sess:
-            click.echo(f"❌ 未找到会话: {session_id}")
-            return []
-        sess.recalculate_counts()
-        if plot:
-            filtered = filter_images_by_plot([sess], plot)
-            return filtered if filtered else [sess]
-        return [sess]
-
-    if plot:
-        sessions = get_sessions_by_plot(plot, store_dir or None)
-        for s in sessions:
-            s.recalculate_counts()
-        sessions = filter_images_by_plot(sessions, plot)
-        if not sessions:
-            click.echo(f"❌ 未找到地块 {plot} 的记录")
-            return []
-        return sessions
-
-    sessions_meta = list_sessions(store_dir or None)
-    if not sessions_meta:
-        click.echo("📭 暂无扫描会话")
-        return []
-    sessions = []
-    for meta in sessions_meta:
-        s = load_session(meta["id"], store_dir or None)
-        if s:
-            s.recalculate_counts()
-            sessions.append(s)
-    return sessions
+    click.echo(f"✅ 已导出到: {os.path.abspath(output)}")
 
 
-def _collect_rows(sessions):
+def _collect_detail_rows(sessions):
     headers = [
         "会话ID", "巡园日期", "品种", "地块编号", "文件名", "文件路径",
         "图片尺寸", "是否模糊", "模糊度", "病害类型", "置信度", "病斑区域",
@@ -133,51 +110,143 @@ def _collect_rows(sessions):
     return rows
 
 
-def _export_csv(rows, output_path):
+def _collect_plot_summary_rows(stats):
+    headers = [
+        "地块编号", "总图片数", "病害图片数", "健康图片数", "发病率(%)",
+        "病斑面积合计(px²)", "面积占比(%)", "主要病害", "防治建议摘要",
+    ]
+    rows = [headers]
+    plot_stats = stats["plot_stats"]
+    for pid in sorted(plot_stats.keys()):
+        total_img = stats["plot_total_images"].get(pid, 0)
+        disease_img = stats["plot_disease_images"].get(pid, 0)
+        healthy_img = stats["plot_healthy_images"].get(pid, 0)
+        rate = disease_img / max(1, total_img) * 100
+        total_lesion = sum(stats["plot_lesion_area"].get(pid, {}).values())
+        total_img_area = stats["plot_image_area"].get(pid, 0)
+        area_pct = total_lesion / max(1, total_img_area) * 100 if total_img_area > 0 else 0
+        diseases_in_plot = plot_stats[pid]
+        if diseases_in_plot:
+            primary = max(diseases_in_plot, key=diseases_in_plot.get)
+            treatment = get_treatment(primary)
+        else:
+            primary = "-"
+            treatment = "-"
+        rows.append([
+            pid, total_img, disease_img, healthy_img,
+            f"{rate:.1f}", total_lesion, f"{area_pct:.2f}",
+            primary, treatment,
+        ])
+    return rows
+
+
+def _collect_disease_summary_rows(stats):
+    headers = [
+        "病害名称", "检出数", "检出占比(%)", "平均置信度",
+        "病斑面积合计(px²)", "面积占比(%)", "涉及地块", "防治方案",
+    ]
+    rows = [headers]
+    all_disease_stats = stats["all_disease_stats"]
+    plot_stats = stats["plot_stats"]
+    total_det = sum(all_disease_stats.values())
+    for dname, count in sorted(all_disease_stats.items(), key=lambda x: -x[1]):
+        confs = stats["all_confidence"].get(dname, [])
+        avg_conf = sum(confs) / len(confs) if confs else 0
+        la = stats["disease_lesion_area"].get(dname, 0)
+        ia = stats["disease_image_area"].get(dname, 0)
+        ratio = count / max(1, total_det) * 100
+        area_pct = la / max(1, ia) * 100 if ia > 0 else 0
+        affected_plots = [pid for pid in plot_stats if dname in plot_stats[pid]]
+        treatment = get_treatment(dname)
+        rows.append([
+            dname, count, f"{ratio:.1f}", f"{avg_conf:.1%}",
+            la, f"{area_pct:.2f}",
+            ", ".join(sorted(affected_plots)), treatment,
+        ])
+    return rows
+
+
+def _export_csv_detail(sessions, output_path):
+    rows = _collect_detail_rows(sessions)
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         for row in rows:
             writer.writerow(row)
+    click.echo(f"   明细: {len(rows)-1} 条记录")
 
 
-def _export_xlsx(rows, output_path):
+def _export_csv_summary(sessions, output_path):
+    stats = compute_statistics(sessions)
+    plot_rows = _collect_plot_summary_rows(stats)
+    disease_rows = _collect_disease_summary_rows(stats)
+
+    with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["=== 地块台账汇总 ==="])
+        for row in plot_rows:
+            writer.writerow(row)
+        writer.writerow([])
+        writer.writerow(["=== 病害汇总 ==="])
+        for row in disease_rows:
+            writer.writerow(row)
+    click.echo(f"   汇总: {len(plot_rows)-1} 地块 + {len(disease_rows)-1} 病害")
+
+
+def _export_xlsx(sessions, output_path):
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
     except ImportError:
         click.echo("⚠️  未安装 openpyxl，改用 CSV 格式导出")
         csv_path = output_path.rsplit(".", 1)[0] + ".csv"
-        _export_csv(rows, csv_path)
+        _export_csv_detail(sessions, csv_path)
         return
 
+    stats = compute_statistics(sessions)
     wb = Workbook()
-    ws = wb.active
-    ws.title = "病害检测"
 
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    header_font_white = Font(bold=True, size=11, color="FFFFFF")
+    header_font = Font(bold=True, size=11, color="FFFFFF")
     thin_border = Border(
-        left=Side(style="thin"),
-        right=Side(style="thin"),
-        top=Side(style="thin"),
-        bottom=Side(style="thin"),
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
     )
+    disease_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+    ws_detail = wb.active
+    ws_detail.title = "明细"
+    _write_sheet(ws_detail, _collect_detail_rows(sessions), header_fill, header_font, thin_border, disease_fill)
+
+    ws_plot = wb.create_sheet("地块汇总")
+    _write_sheet(ws_plot, _collect_plot_summary_rows(stats), header_fill, header_font, thin_border)
+
+    ws_disease = wb.create_sheet("病害汇总")
+    _write_sheet(ws_disease, _collect_disease_summary_rows(stats), header_fill, header_font, thin_border, disease_fill)
+
+    wb.save(output_path)
+    detail_count = len(sessions)
+    click.echo(f"   明细表 + 地块汇总表 + 病害汇总表")
+
+
+def _write_sheet(ws, rows, header_fill, header_font, border, disease_fill=None):
+    from openpyxl.styles import Alignment as _Alignment
 
     for row_idx, row in enumerate(rows, 1):
         for col_idx, value in enumerate(row, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
-            cell.border = thin_border
-            cell.alignment = Alignment(vertical="center")
+            cell.border = border
+            cell.alignment = _Alignment(vertical="center")
             if row_idx == 1:
-                cell.font = header_font_white
+                cell.font = header_font
                 cell.fill = header_fill
 
-    disease_col = 10
-    for row_idx in range(2, len(rows) + 1):
-        cell = ws.cell(row=row_idx, column=disease_col)
-        val = cell.value
-        if val and val not in ("健康", ""):
-            cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    if disease_fill:
+        for row_idx in range(2, len(rows) + 1):
+            for col_idx in range(1, len(rows[0]) + 1):
+                header = rows[0][col_idx - 1] if col_idx <= len(rows[0]) else ""
+                val = ws.cell(row=row_idx, column=col_idx).value
+                if header in ("病害类型", "病害名称", "主要病害") and val and val not in ("健康", "", "-"):
+                    ws.cell(row=row_idx, column=col_idx).fill = disease_fill
 
     for col in ws.columns:
         max_length = 0
@@ -189,5 +258,3 @@ def _export_xlsx(rows, output_path):
             except Exception:
                 pass
         ws.column_dimensions[col_letter].width = min(max_length + 4, 40)
-
-    wb.save(output_path)

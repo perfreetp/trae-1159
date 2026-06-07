@@ -1,12 +1,12 @@
 import click
 from collections import defaultdict
 from ..core.models import DiseaseType
+from ..core.detector import get_treatment
 from ..core.store import (
-    list_sessions,
-    load_session,
-    get_sessions_by_plot,
-    get_sessions_by_date_range,
+    resolve_sessions,
     filter_images_by_plot,
+    load_session,
+    compute_statistics,
 )
 
 
@@ -21,120 +21,122 @@ def compare_command(plot, from_date, to_date, session1, session2, store_dir):
     """比较不同日期的病害扩散情况"""
 
     if session1 and session2:
-        sess1 = load_session(session1, store_dir or None)
-        sess2 = load_session(session2, store_dir or None)
-        if not sess1:
-            click.echo(f"❌ 未找到会话: {session1}")
-            return
-        if not sess2:
-            click.echo(f"❌ 未找到会话: {session2}")
-            return
-        sess1.recalculate_counts()
-        sess2.recalculate_counts()
-        if plot:
-            sess1 = filter_images_by_plot([sess1], plot)[0] if filter_images_by_plot([sess1], plot) else sess1
-            sess2 = filter_images_by_plot([sess2], plot)[0] if filter_images_by_plot([sess2], plot) else sess2
-        _compare_two_sessions(sess1, sess2)
+        _compare_two_sessions(session1, session2, plot, store_dir)
         return
 
-    if plot:
-        sessions = get_sessions_by_plot(plot, store_dir or None)
-        sessions = filter_images_by_plot(sessions, plot)
-    elif from_date and to_date:
-        sessions = get_sessions_by_date_range(from_date, to_date, store_dir or None)
-    else:
-        sessions_meta = list_sessions(store_dir or None)
-        if not sessions_meta:
+    sessions, ok = resolve_sessions(
+        plot=plot, from_date=from_date, to_date=to_date, store_dir=store_dir or None
+    )
+    if not ok or not sessions:
+        if plot and from_date and to_date:
+            click.echo(f"❌ 地块 {plot} 在 {from_date}~{to_date} 无巡园记录")
+        elif plot:
+            click.echo(f"❌ 地块 {plot} 无巡园记录")
+        elif from_date and to_date:
+            click.echo(f"❌ {from_date}~{to_date} 无巡园记录")
+        else:
             click.echo("📭 暂无扫描会话")
-            return
-        sessions = []
-        for meta in sessions_meta:
-            s = load_session(meta["id"], store_dir or None)
-            if s:
-                s.recalculate_counts()
-                sessions.append(s)
-
-    for s in sessions:
-        s.recalculate_counts()
+        return
 
     if len(sessions) < 2:
-        click.echo("⚠️  至少需要2次扫描会话才能比较，请先运行更多 scan")
-        _list_available_sessions(sessions)
+        click.echo("⚠️  至少需要2次巡园记录才能对比")
+        _list_available(sessions)
         return
 
-    sessions.sort(key=lambda s: s.scan_date or s.created_at[:10])
-    _compare_trend(sessions)
+    _compare_trend(sessions, plot)
 
 
-def _compare_two_sessions(sess1, sess2):
+def _compare_two_sessions(s1_id, s2_id, plot, store_dir):
+    sess1 = load_session(s1_id, store_dir or None)
+    sess2 = load_session(s2_id, store_dir or None)
+    if not sess1:
+        click.echo(f"❌ 未找到会话: {s1_id}")
+        return
+    if not sess2:
+        click.echo(f"❌ 未找到会话: {s2_id}")
+        return
+    sess1.recalculate_counts()
+    sess2.recalculate_counts()
+
+    if plot:
+        f1 = filter_images_by_plot([sess1], plot)
+        f2 = filter_images_by_plot([sess2], plot)
+        if not f1:
+            click.echo(f"❌ 会话 {s1_id} 中没有地块 {plot} 的图片")
+            return
+        if not f2:
+            click.echo(f"❌ 会话 {s2_id} 中没有地块 {plot} 的图片")
+            return
+        sess1, sess2 = f1[0], f2[0]
+
     click.echo("\n📊 会话对比:")
     click.echo("=" * 70)
-    click.echo(f"  会话A: {sess1.id}  巡园日期={sess1.scan_date or sess1.created_at[:10]}  "
-               f"品种={sess1.variety}  地块={sess1.plot_id}")
-    click.echo(f"  会话B: {sess2.id}  巡园日期={sess2.scan_date or sess2.created_at[:10]}  "
-               f"品种={sess2.variety}  地块={sess2.plot_id}")
+    click.echo(f"  会话A: {sess1.id}  巡园日期={sess1.scan_date or sess1.created_at[:10]}")
+    click.echo(f"  会话B: {sess2.id}  巡园日期={sess2.scan_date or sess2.created_at[:10]}")
     click.echo("-" * 70)
 
     stats1 = _compute_disease_stats(sess1)
     stats2 = _compute_disease_stats(sess2)
 
-    click.echo(f"\n  {'指标':<16} {'会话A':>10} {'会话B':>10} {'变化':>10}")
-    click.echo("  " + "-" * 50)
-
-    click.echo(
-        f"  {'总图片数':<14} {sess1.total_images:>10} {sess2.total_images:>10} "
-        f"{sess2.total_images - sess1.total_images:>+10}"
-    )
-    click.echo(
-        f"  {'病害图片':<14} {sess1.disease_count:>10} {sess2.disease_count:>10} "
-        f"{sess2.disease_count - sess1.disease_count:>+10}"
-    )
-    click.echo(
-        f"  {'健康图片':<14} {sess1.healthy_count:>10} {sess2.healthy_count:>10} "
-        f"{sess2.healthy_count - sess1.healthy_count:>+10}"
-    )
-    click.echo(
-        f"  {'模糊图片':<14} {sess1.blurry_count:>10} {sess2.blurry_count:>10} "
-        f"{sess2.blurry_count - sess1.blurry_count:>+10}"
-    )
+    click.echo(f"\n  {'指标':<14} {'会话A':>8} {'会话B':>8} {'变化':>8}")
+    click.echo("  " + "-" * 42)
+    for label, v1, v2 in [
+        ("总图片", sess1.total_images, sess2.total_images),
+        ("病害图片", sess1.disease_count, sess2.disease_count),
+        ("健康图片", sess1.healthy_count, sess2.healthy_count),
+        ("模糊图片", sess1.blurry_count, sess2.blurry_count),
+    ]:
+        click.echo(f"  {label:<14} {v1:>8} {v2:>8} {v2-v1:>+8}")
 
     all_diseases = set(list(stats1.keys()) + list(stats2.keys()))
     if all_diseases:
-        click.echo(f"\n  🦠 各病害检出数:")
-        click.echo(f"  {'病害':<14} {'会话A':>10} {'会话B':>10} {'变化':>10}")
-        click.echo("  " + "-" * 50)
+        click.echo(f"\n  🦠 各病害:")
+        click.echo(f"  {'病害':<10} {'会话A':>6} {'会话B':>6} {'变化':>6}")
+        click.echo("  " + "-" * 34)
         for dname in sorted(all_diseases):
-            c1 = stats1.get(dname, 0)
-            c2 = stats2.get(dname, 0)
+            c1, c2 = stats1.get(dname, 0), stats2.get(dname, 0)
             delta = c2 - c1
             arrow = "📈" if delta > 0 else ("📉" if delta < 0 else "➡️")
-            click.echo(f"  {dname:<14} {c1:>10} {c2:>10} {delta:>+10} {arrow}")
+            click.echo(f"  {dname:<10} {c1:>6} {c2:>6} {delta:>+6} {arrow}")
 
     rate1 = sess1.disease_count / max(1, sess1.total_images) * 100
     rate2 = sess2.disease_count / max(1, sess2.total_images) * 100
-    click.echo(f"\n  发病率: 会话A={rate1:.1f}%  会话B={rate2:.1f}%  变化={rate2 - rate1:+.1f}%")
-
-    if rate2 > rate1:
-        click.echo("  ⚠️  病害呈扩散趋势，建议加强防治！")
-    elif rate2 < rate1:
-        click.echo("  ✅ 病害有所控制，防治措施有效。")
+    risk = _assess_risk(rate1, rate2)
+    click.echo(f"\n  发病率: {rate1:.1f}% → {rate2:.1f}%  变化={rate2-rate1:+.1f}%  风险等级: {risk}")
 
 
-def _compare_trend(sessions):
-    click.echo("\n📊 病害趋势分析:")
+def _compare_trend(sessions, plot_filter):
+    click.echo("\n📊 病害趋势分析")
     click.echo("=" * 70)
+    if plot_filter:
+        click.echo(f"  地块: {plot_filter}")
+    click.echo(f"  巡园次数: {len(sessions)}")
+    click.echo()
 
-    click.echo(f"\n  {'巡园日期':<12} {'总图片':>8} {'病害':>8} {'健康':>8} {'模糊':>8} {'发病率':>8}")
-    click.echo("  " + "-" * 56)
+    click.echo("  📈 发病率趋势:")
+    click.echo(f"  {'巡园日期':<12} {'总图片':>6} {'病害':>6} {'健康':>6} {'发病率':>7}  趋势")
+    click.echo("  " + "-" * 60)
 
+    prev_rate = None
     for sess in sessions:
         rate = sess.disease_count / max(1, sess.total_images) * 100
         d = sess.scan_date or sess.created_at[:10]
-        bar = "█" * int(rate / 5)
-        click.echo(
-            f"  {d:<12} {sess.total_images:>8} {sess.disease_count:>8} "
-            f"{sess.healthy_count:>8} {sess.blurry_count:>8} {rate:>7.1f}% {bar}"
-        )
+        bar_len = max(1, int(rate / 2))
+        bar = "█" * bar_len
+
+        if prev_rate is not None:
+            diff = rate - prev_rate
+            arrow = "↑" if diff > 0 else ("↓" if diff < 0 else "→")
+            delta_str = f" {arrow}{abs(diff):.1f}%"
+        else:
+            delta_str = ""
+
+        click.echo(f"  {d:<12} {sess.total_images:>6} {sess.disease_count:>6} {sess.healthy_count:>6} {rate:>6.1f}%  {bar}{delta_str}")
+        prev_rate = rate
+
+    first_rate = sessions[0].disease_count / max(1, sessions[0].total_images) * 100
+    last_rate = sessions[-1].disease_count / max(1, sessions[-1].total_images) * 100
+    overall_risk = _assess_risk(first_rate, last_rate)
 
     disease_trend = defaultdict(list)
     for sess in sessions:
@@ -143,13 +145,77 @@ def _compare_trend(sessions):
         for dname, count in stats.items():
             disease_trend[dname].append((d, count))
 
-    if disease_trend:
-        click.echo(f"\n  🦠 各病害变化趋势:")
-        for dname in sorted(disease_trend.keys()):
-            points = disease_trend[dname]
-            counts = [c for _, c in points]
-            trend = "📈上升" if counts[-1] > counts[0] else ("📉下降" if counts[-1] < counts[0] else "➡️持平")
-            click.echo(f"  • {dname}: {counts[0]}→{counts[-1]} {trend}")
+    click.echo(f"\n  🦠 各病害变化趋势:")
+    fastest_disease = None
+    fastest_disease_rate = 0
+    for dname in sorted(disease_trend.keys()):
+        points = disease_trend[dname]
+        counts = [c for _, c in points]
+        first_c, last_c = counts[0], counts[-1]
+        if first_c > 0:
+            growth = (last_c - first_c) / first_c * 100
+        elif last_c > 0:
+            growth = float("inf")
+        else:
+            growth = 0
+        trend = "📈上升" if last_c > first_c else ("📉下降" if last_c < first_c else "➡️持平")
+        dates_str = " → ".join(f"{d}({c})" for d, c in points)
+        click.echo(f"  • {dname}: {dates_str}  {trend}")
+        if growth > fastest_disease_rate and growth != float("inf"):
+            fastest_disease_rate = growth
+            fastest_disease = dname
+        if growth == float("inf") and fastest_disease is None:
+            fastest_disease = dname
+            fastest_disease_rate = growth
+
+    if not plot_filter and len(sessions) >= 2:
+        click.echo(f"\n  🗺️ 各地块发病率变化:")
+        plot_trend = defaultdict(list)
+        for sess in sessions:
+            for img in sess.images:
+                pid = img.plot_id or "未知地块"
+            plot_disease_count = defaultdict(int)
+            plot_total = defaultdict(int)
+            for img in sess.images:
+                pid = img.plot_id or sess.plot_id or "未知地块"
+                plot_total[pid] += 1
+                if img.has_disease():
+                    plot_disease_count[pid] += 1
+            d = sess.scan_date or sess.created_at[:10]
+            for pid in plot_total:
+                rate = plot_disease_count[pid] / max(1, plot_total[pid]) * 100
+                plot_trend[pid].append((d, rate))
+
+        fastest_plot = None
+        fastest_plot_rate = 0
+        for pid in sorted(plot_trend.keys()):
+            points = plot_trend[pid]
+            rates = [r for _, r in points]
+            first_r, last_r = rates[0], rates[-1]
+            delta = last_r - first_r
+            trend = "📈" if delta > 0 else ("📉" if delta < 0 else "➡️")
+            dates_str = " → ".join(f"{d}({r:.0f}%)" for d, r in points)
+            click.echo(f"  • 地块 {pid}: {dates_str}  {trend}")
+            if delta > fastest_plot_rate:
+                fastest_plot_rate = delta
+                fastest_plot = pid
+
+        if fastest_plot:
+            click.echo(f"\n  ⚡ 增长最快地块: {fastest_plot} (发病率增加 {fastest_plot_rate:+.1f}%)")
+
+    if fastest_disease:
+        growth_str = f"+{fastest_disease_rate:.0f}%" if fastest_disease_rate != float("inf") else "从0新增"
+        click.echo(f"  ⚡ 增长最快病害: {fastest_disease} ({growth_str})")
+
+    click.echo(f"\n  🚨 总体风险等级: {overall_risk}")
+    if "明显扩散" in overall_risk:
+        click.echo("  建议: 立即启动集中防治，重点喷药并清除病源")
+    elif "加重" in overall_risk:
+        click.echo("  建议: 加强巡查频率，针对高发病地块重点防治")
+    elif "轻微" in overall_risk:
+        click.echo("  建议: 继续监测，保持常规防治措施")
+    else:
+        click.echo("  建议: 维持现有防治方案")
 
 
 def _compute_disease_stats(sess) -> dict:
@@ -161,7 +227,21 @@ def _compute_disease_stats(sess) -> dict:
     return dict(stats)
 
 
-def _list_available_sessions(sessions):
+def _assess_risk(first_rate: float, last_rate: float) -> str:
+    delta = last_rate - first_rate
+    if delta >= 20:
+        return "🔴 明显扩散"
+    elif delta >= 10:
+        return "🟠 加重"
+    elif delta > 0:
+        return "🟡 轻微"
+    elif delta == 0:
+        return "➡️ 持平"
+    else:
+        return "🟢 减轻"
+
+
+def _list_available(sessions):
     click.echo("\n可用会话:")
     for i, s in enumerate(sessions):
         click.echo(

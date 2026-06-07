@@ -1,13 +1,7 @@
 import click
-from collections import defaultdict
-from ..core.models import DiseaseType, DISEASE_NAMES_CN
+from ..core.models import DiseaseType
 from ..core.detector import get_treatment
-from ..core.store import (
-    load_session,
-    list_sessions,
-    get_sessions_by_plot,
-    filter_images_by_plot,
-)
+from ..core.store import resolve_sessions, compute_statistics
 
 
 @click.command("report")
@@ -17,150 +11,137 @@ from ..core.store import (
 def report_command(session_id, plot, store_dir):
     """统计发病株数和面积，生成防治建议清单"""
 
-    if session_id:
-        sess = load_session(session_id, store_dir or None)
-        if not sess:
+    sessions, ok = resolve_sessions(
+        session_id=session_id, plot=plot, store_dir=store_dir or None
+    )
+    if not ok or not sessions:
+        if session_id:
             click.echo(f"❌ 未找到会话: {session_id}")
-            return
-        sess.recalculate_counts()
-        sessions = [sess]
-    elif plot:
-        sessions = get_sessions_by_plot(plot, store_dir or None)
-        for s in sessions:
-            s.recalculate_counts()
-        sessions = filter_images_by_plot(sessions, plot)
-        if not sessions:
+        elif plot:
             click.echo(f"❌ 未找到地块 {plot} 的扫描记录")
-            return
-    else:
-        sessions_meta = list_sessions(store_dir or None)
-        if not sessions_meta:
+        else:
             click.echo("📭 暂无扫描会话")
-            return
-        sessions = []
-        for meta in sessions_meta:
-            s = load_session(meta["id"], store_dir or None)
-            if s:
-                s.recalculate_counts()
-                sessions.append(s)
+        return
+
+    stats = compute_statistics(sessions)
 
     click.echo("\n" + "=" * 70)
     click.echo("📋 果园病害诊断报告")
     click.echo("=" * 70)
 
-    total_images = 0
-    total_disease = 0
-    total_healthy = 0
-    total_blurry = 0
-    all_disease_stats = defaultdict(int)
-    all_confidence = defaultdict(list)
-    plot_stats = defaultdict(lambda: defaultdict(int))
-    variety_stats = defaultdict(lambda: defaultdict(int))
-
-    plot_lesion_area = defaultdict(lambda: defaultdict(int))
-    plot_image_area = defaultdict(int)
-    disease_lesion_area = defaultdict(int)
-    disease_image_area = defaultdict(int)
-
-    for sess in sessions:
-        click.echo(f"\n📅 会话: {sess.id}  巡园日期: {sess.scan_date or sess.created_at[:10]}")
-        click.echo(f"   品种: {sess.variety or '-'}  地块: {sess.plot_id or '-'}")
-        click.echo(f"   图片: {sess.total_images}  病害: {sess.disease_count}  "
-                    f"健康: {sess.healthy_count}  模糊: {sess.blurry_count}")
-
-        total_images += sess.total_images
-        total_disease += sess.disease_count
-        total_healthy += sess.healthy_count
-        total_blurry += sess.blurry_count
-
-        for img in sess.images:
-            pid = img.plot_id or sess.plot_id or "未知地块"
-            var = img.variety or sess.variety or "未知品种"
-            img_area = img.image_area()
-
-            if img_area > 0:
-                plot_image_area[pid] += img_area
-
-            for det in img.detections:
-                if det.disease not in (DiseaseType.HEALTHY, DiseaseType.UNKNOWN):
-                    dname = det.disease.value
-                    all_disease_stats[dname] += 1
-                    all_confidence[dname].append(det.confidence)
-                    plot_stats[pid][dname] += 1
-                    variety_stats[var][dname] += 1
-
-                    if det.bbox and img_area > 0:
-                        bbox_area = det.bbox.area()
-                        disease_lesion_area[dname] += bbox_area
-                        disease_image_area[dname] += img_area
-                        plot_lesion_area[pid][dname] += bbox_area
-
-    click.echo("\n" + "-" * 70)
-    click.echo("📊 总体统计:")
+    click.echo(f"\n📅 巡园日期: {', '.join(stats['scan_dates'])}")
     click.echo(f"   扫描会话数: {len(sessions)}")
-    click.echo(f"   总图片数: {total_images}")
-    click.echo(f"   疑似病害: {total_disease} ({total_disease / max(1, total_images) * 100:.1f}%)")
-    click.echo(f"   健康图片: {total_healthy}")
-    click.echo(f"   模糊照片: {total_blurry}")
+    click.echo(f"   总图片数: {stats['total_images']}")
+    click.echo(f"   疑似病害: {stats['total_disease']} ({stats['total_disease'] / max(1, stats['total_images']) * 100:.1f}%)")
+    click.echo(f"   健康图片: {stats['total_healthy']}")
+    click.echo(f"   模糊照片: {stats['total_blurry']}")
 
-    if all_disease_stats:
-        click.echo("\n🦠 病害检出统计:")
-        click.echo(f"   {'病害名称':<12} {'检出数':>8} {'占比':>8} {'平均置信度':>12} {'最高置信度':>12} {'病斑面积':>12} {'面积占比':>10}")
-        click.echo("   " + "-" * 80)
-        total_det = sum(all_disease_stats.values())
-        for dname, count in sorted(all_disease_stats.items(), key=lambda x: -x[1]):
-            avg_conf = sum(all_confidence[dname]) / len(all_confidence[dname])
-            max_conf = max(all_confidence[dname])
-            ratio = count / max(1, total_det) * 100
-            la = disease_lesion_area.get(dname, 0)
-            ia = disease_image_area.get(dname, 0)
-            area_pct = la / max(1, ia) * 100 if ia > 0 else 0
-            area_str = f"{la:,} px²" if la > 0 else "-"
-            pct_str = f"{area_pct:.2f}%" if la > 0 else "-"
-            click.echo(
-                f"   {dname:<12} {count:>8} {ratio:>7.1f}% {avg_conf:>11.1%} {max_conf:>11.1%} {area_str:>12} {pct_str:>10}"
-            )
-
-    if plot_stats:
-        click.echo("\n🗺️ 按地块统计:")
-        for pid in sorted(plot_stats.keys()):
-            click.echo(f"   地块 {pid}:")
-            total_plot_lesion = sum(plot_lesion_area[pid].values())
-            total_plot_img_area = plot_image_area.get(pid, 0)
-            overall_pct = total_plot_lesion / max(1, total_plot_img_area) * 100 if total_plot_img_area > 0 else 0
-            for dname, count in sorted(plot_stats[pid].items(), key=lambda x: -x[1]):
-                la = plot_lesion_area[pid].get(dname, 0)
-                la_pct = la / max(1, total_plot_img_area) * 100 if total_plot_img_area > 0 else 0
-                la_str = f"{la:,} px²" if la > 0 else "-"
-                click.echo(f"     • {dname}: {count} 处  病斑面积={la_str}  占图片面积={la_pct:.2f}%")
-            click.echo(f"     合计病斑面积: {total_plot_lesion:,} px²  占图片面积={overall_pct:.2f}%")
-
-    if variety_stats:
-        click.echo("\n🌳 按品种统计:")
-        for var in sorted(variety_stats.keys()):
-            click.echo(f"   {var}:")
-            for dname, count in sorted(variety_stats[var].items(), key=lambda x: -x[1]):
-                click.echo(f"     • {dname}: {count} 处")
-
-    if all_disease_stats:
-        click.echo("\n" + "-" * 70)
-        click.echo("💊 防治建议清单:")
-        click.echo()
-        for dname in sorted(all_disease_stats.keys()):
-            treatment = get_treatment(dname)
-            count = all_disease_stats[dname]
-            affected_plots = [
-                pid for pid in plot_stats if dname in plot_stats[pid]
-            ]
-            la = disease_lesion_area.get(dname, 0)
-            ia = disease_image_area.get(dname, 0)
-            click.echo(f"   【{dname}】检出 {count} 处")
-            if affected_plots:
-                click.echo(f"     涉及地块: {', '.join(sorted(affected_plots))}")
-            if la > 0 and ia > 0:
-                click.echo(f"     总病斑面积: {la:,} px²  占比: {la / max(1, ia) * 100:.2f}%")
-            click.echo(f"     防治方案: {treatment}")
-            click.echo()
+    _print_disease_summary(stats)
+    _print_plot_summary(stats)
+    _print_variety_summary(stats)
+    _print_treatment_list(stats)
 
     click.echo("=" * 70)
     click.echo("报告生成完毕")
+
+
+def _print_disease_summary(stats):
+    all_disease_stats = stats["all_disease_stats"]
+    if not all_disease_stats:
+        return
+
+    click.echo("\n" + "-" * 70)
+    click.echo("🦠 病害汇总:")
+    click.echo(f"   {'病害名称':<10} {'检出数':>6} {'占比':>7} {'平均置信度':>10} {'病斑面积(px²)':>14} {'面积占比':>8}")
+    click.echo("   " + "-" * 60)
+    total_det = sum(all_disease_stats.values())
+    for dname, count in sorted(all_disease_stats.items(), key=lambda x: -x[1]):
+        confs = stats["all_confidence"].get(dname, [])
+        avg_conf = sum(confs) / len(confs) if confs else 0
+        la = stats["disease_lesion_area"].get(dname, 0)
+        ia = stats["disease_image_area"].get(dname, 0)
+        ratio = count / max(1, total_det) * 100
+        area_pct = la / max(1, ia) * 100 if ia > 0 else 0
+        area_str = f"{la:,}" if la > 0 else "-"
+        pct_str = f"{area_pct:.2f}%" if la > 0 else "-"
+        click.echo(f"   {dname:<10} {count:>6} {ratio:>6.1f}% {avg_conf:>9.1%} {area_str:>14} {pct_str:>8}")
+
+
+def _print_plot_summary(stats):
+    plot_stats = stats["plot_stats"]
+    if not plot_stats:
+        return
+
+    click.echo("\n" + "-" * 70)
+    click.echo("🗺️ 地块台账汇总:")
+    click.echo(f"   {'地块':<8} {'总图片':>6} {'病害':>6} {'健康':>6} {'发病率':>7} {'病斑面积(px²)':>14} {'面积占比':>8} {'主要病害':<10} {'防治建议摘要':<20}")
+    click.echo("   " + "-" * 100)
+
+    for pid in sorted(plot_stats.keys()):
+        total_img = stats["plot_total_images"].get(pid, 0)
+        disease_img = stats["plot_disease_images"].get(pid, 0)
+        healthy_img = stats["plot_healthy_images"].get(pid, 0)
+        rate = disease_img / max(1, total_img) * 100
+        total_lesion = sum(stats["plot_lesion_area"].get(pid, {}).values())
+        total_img_area = stats["plot_image_area"].get(pid, 0)
+        area_pct = total_lesion / max(1, total_img_area) * 100 if total_img_area > 0 else 0
+        lesion_str = f"{total_lesion:,}" if total_lesion > 0 else "-"
+        pct_str = f"{area_pct:.2f}%" if total_lesion > 0 else "-"
+
+        diseases_in_plot = plot_stats[pid]
+        if diseases_in_plot:
+            primary = max(diseases_in_plot, key=diseases_in_plot.get)
+            treatment = get_treatment(primary)
+            treatment_brief = treatment[:18] + "…" if len(treatment) > 18 else treatment
+        else:
+            primary = "-"
+            treatment_brief = "-"
+
+        click.echo(
+            f"   {pid:<8} {total_img:>6} {disease_img:>6} {healthy_img:>6} "
+            f"{rate:>6.1f}% {lesion_str:>14} {pct_str:>8} {primary:<10} {treatment_brief:<20}"
+        )
+
+        if diseases_in_plot:
+            for dname, count in sorted(diseases_in_plot.items(), key=lambda x: -x[1]):
+                la = stats["plot_lesion_area"].get(pid, {}).get(dname, 0)
+                la_pct = la / max(1, total_img_area) * 100 if total_img_area > 0 else 0
+                la_str = f"{la:,}" if la > 0 else "-"
+                click.echo(f"     → {dname}: {count}处  病斑面积={la_str}  占比={la_pct:.2f}%")
+
+
+def _print_variety_summary(stats):
+    variety_stats = stats["variety_stats"]
+    if not variety_stats:
+        return
+
+    click.echo("\n" + "-" * 70)
+    click.echo("🌳 按品种统计:")
+    for var in sorted(variety_stats.keys()):
+        click.echo(f"   {var}:")
+        for dname, count in sorted(variety_stats[var].items(), key=lambda x: -x[1]):
+            click.echo(f"     • {dname}: {count} 处")
+
+
+def _print_treatment_list(stats):
+    all_disease_stats = stats["all_disease_stats"]
+    plot_stats = stats["plot_stats"]
+    if not all_disease_stats:
+        return
+
+    click.echo("\n" + "-" * 70)
+    click.echo("💊 防治建议清单:")
+    click.echo()
+    for dname in sorted(all_disease_stats.keys()):
+        treatment = get_treatment(dname)
+        count = all_disease_stats[dname]
+        affected_plots = [pid for pid in plot_stats if dname in plot_stats[pid]]
+        la = stats["disease_lesion_area"].get(dname, 0)
+        ia = stats["disease_image_area"].get(dname, 0)
+        click.echo(f"   【{dname}】检出 {count} 处")
+        if affected_plots:
+            click.echo(f"     涉及地块: {', '.join(sorted(affected_plots))}")
+        if la > 0 and ia > 0:
+            click.echo(f"     总病斑面积: {la:,} px²  占比: {la / max(1, ia) * 100:.2f}%")
+        click.echo(f"     防治方案: {treatment}")
+        click.echo()

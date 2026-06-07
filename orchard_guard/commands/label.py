@@ -8,9 +8,18 @@ from ..core.store import load_session, update_session, list_sessions
 @click.option("--image", "-i", "image_idx", type=int, default=None, help="图片序号 (从0开始)")
 @click.option("--list-sessions", "list_only", is_flag=True, help="列出所有会话")
 @click.option("--show-all", is_flag=True, help="显示所有图片检测结果")
+@click.option("--range", "img_range", default="", help="批量修正图片序号范围 (如 0-10)")
+@click.option("--filter-disease", "filter_disease", default="", help="筛选病害类型 (如 健康、叶斑病)")
+@click.option("--filter-confidence", "filter_conf", default="", help="筛选置信度区间 (如 0-0.4)")
+@click.option("--set-disease", "set_disease", default="", help="批量设置病害类型 (如 锈病、未知)")
+@click.option("--set-confidence", "set_confidence", type=float, default=None, help="批量设置置信度")
 @click.option("--store-dir", default="", help="数据存储目录")
-def label_command(session_id, image_idx, list_only, show_all, store_dir):
+def label_command(
+    session_id, image_idx, list_only, show_all, img_range,
+    filter_disease, filter_conf, set_disease, set_confidence, store_dir
+):
     """查看和修正病害识别结果"""
+
     if list_only or not session_id:
         sessions = list_sessions(store_dir or None)
         if not sessions:
@@ -23,7 +32,7 @@ def label_command(session_id, image_idx, list_only, show_all, store_dir):
                 f"品种={s.get('variety', '-')}  地块={s.get('plot_id', '-')}  "
                 f"图片={s.get('total_images', 0)}  "
                 f"病害={s.get('disease_count', 0)}  "
-                f"日期={s.get('created_at', '')[:10]}"
+                f"巡园日期={s.get('scan_date', '-')}"
             )
         if not session_id:
             click.echo("\n使用 --session <ID> 指定会话进行标注")
@@ -38,6 +47,16 @@ def label_command(session_id, image_idx, list_only, show_all, store_dir):
         _show_all_results(sess)
         return
 
+    batch_mode = img_range or filter_disease or filter_conf
+    modify_mode = set_disease or set_confidence is not None
+
+    if batch_mode:
+        if modify_mode:
+            _batch_modify(sess, img_range, filter_disease, filter_conf, set_disease, set_confidence, store_dir)
+        else:
+            _batch_preview(sess, img_range, filter_disease, filter_conf)
+        return
+
     if image_idx is not None:
         _label_single(sess, image_idx, store_dir)
     else:
@@ -49,18 +68,13 @@ def _show_all_results(sess):
     click.echo(f"   品种: {sess.variety or '-'}  地块: {sess.plot_id or '-'}")
     click.echo("-" * 80)
     for idx, img in enumerate(sess.images):
-        status = "🔍" if not img.is_blurry else "🌫️ 模糊"
+        status = "🔍" if not img.is_blurry else "🌫️模糊"
         disease_str = ", ".join(
             f"{d.disease.value}({d.confidence:.0%}{'✏️' if d.corrected else ''})"
             for d in img.detections
         ) or "无检测"
-        click.echo(f"  [{idx}] {status} {img.file_name}")
+        click.echo(f"  [{idx}] {status} {img.file_name}  地块={img.plot_id or '-'}")
         click.echo(f"       → {disease_str}")
-        for det in img.detections:
-            if det.bbox:
-                click.echo(
-                    f"       → 区域: ({det.bbox.x1},{det.bbox.y1})-({det.bbox.x2},{det.bbox.y2})"
-                )
 
 
 def _label_single(sess, idx, store_dir):
@@ -146,8 +160,16 @@ def _prompt_correction(sess, img_idx, store_dir):
         click.echo("❌ 序号无效")
         return
 
+    _apply_disease_change(img.detections[det_idx])
+
+    update_session(sess, store_dir or None)
+    det = img.detections[det_idx]
+    click.echo(f"✅ 已修正: {det.original_disease.value if det.original_disease else '?'} → {det.disease.value} ({det.confidence:.0%})")
+
+
+def _apply_disease_change(det):
     available = [d for d in DiseaseType if d not in (DiseaseType.UNKNOWN,)]
-    click.echo("选择正确病害类型:")
+    click.echo("选择病害类型:")
     for di, dt in enumerate(available):
         click.echo(f"  [{di}] {dt.value}")
 
@@ -156,7 +178,6 @@ def _prompt_correction(sess, img_idx, store_dir):
         click.echo("❌ 序号无效")
         return
 
-    det = img.detections[det_idx]
     if not det.corrected:
         det.original_disease = det.disease
     det.disease = available[new_idx]
@@ -165,5 +186,99 @@ def _prompt_correction(sess, img_idx, store_dir):
     new_conf = click.prompt("修正后置信度 (0-1)", type=float, default=det.confidence)
     det.confidence = max(0.0, min(1.0, new_conf))
 
+
+def _parse_range(range_str, max_val):
+    if not range_str:
+        return list(range(max_val))
+    indices = []
+    for part in range_str.split(","):
+        part = part.strip()
+        if "-" in part:
+            segs = part.split("-", 1)
+            start = int(segs[0])
+            end = int(segs[1])
+            indices.extend(range(max(0, start), min(end + 1, max_val)))
+        else:
+            idx = int(part)
+            if 0 <= idx < max_val:
+                indices.append(idx)
+    return sorted(set(indices))
+
+
+def _parse_conf_range(conf_str):
+    if not conf_str:
+        return None, None
+    parts = conf_str.split("-", 1)
+    if len(parts) == 2:
+        return float(parts[0]), float(parts[1])
+    v = float(parts[0])
+    return v, v
+
+
+def _match_filters(det, filter_disease, conf_low, conf_high):
+    if filter_disease:
+        if det.disease.value != filter_disease:
+            return False
+    if conf_low is not None:
+        if det.confidence < conf_low or det.confidence > conf_high:
+            return False
+    return True
+
+
+def _batch_preview(sess, img_range, filter_disease, filter_conf):
+    indices = _parse_range(img_range, len(sess.images))
+    conf_low, conf_high = _parse_conf_range(filter_conf)
+    matched = 0
+
+    click.echo(f"\n📋 筛选预览 (会话 {sess.id}):")
+    if filter_disease:
+        click.echo(f"   病害筛选: {filter_disease}")
+    if filter_conf:
+        click.echo(f"   置信度区间: {filter_conf}")
+
+    for idx in indices:
+        img = sess.images[idx]
+        for det in img.detections:
+            if _match_filters(det, filter_disease, conf_low, conf_high):
+                matched += 1
+                click.echo(
+                    f"  [{idx}] {img.file_name}  {det.disease.value} ({det.confidence:.1%})"
+                )
+
+    click.echo(f"\n   共匹配 {matched} 条检测结果")
+    click.echo("   使用 --set-disease 和 --set-confidence 进行批量修正")
+
+
+def _batch_modify(sess, img_range, filter_disease, filter_conf, set_disease, set_confidence, store_dir):
+    target_disease = DISEASE_NAMES_CN.get(set_disease) if set_disease else None
+    if set_disease and not target_disease:
+        click.echo(f"❌ 未知病害类型: {set_disease}")
+        click.echo(f"   可选: {', '.join(d.value for d in DiseaseType)}")
+        return
+
+    indices = _parse_range(img_range, len(sess.images))
+    conf_low, conf_high = _parse_conf_range(filter_conf)
+    modified = 0
+
+    for idx in indices:
+        img = sess.images[idx]
+        for det in img.detections:
+            if _match_filters(det, filter_disease, conf_low, conf_high):
+                if target_disease:
+                    if not det.corrected:
+                        det.original_disease = det.disease
+                    det.disease = target_disease
+                    det.corrected = True
+                if set_confidence is not None:
+                    det.confidence = max(0.0, min(1.0, set_confidence))
+                modified += 1
+
+    if modified == 0:
+        click.echo("⚠️  没有匹配的检测结果")
+        return
+
     update_session(sess, store_dir or None)
-    click.echo(f"✅ 已修正: {det.original_disease.value if det.original_disease else '?'} → {det.disease.value} ({det.confidence:.0%})")
+    click.echo(f"✅ 已批量修正 {modified} 条检测结果")
+
+    sess.recalculate_counts()
+    click.echo(f"   当前统计: 病害={sess.disease_count}  健康={sess.healthy_count}  总图片={sess.total_images}")
