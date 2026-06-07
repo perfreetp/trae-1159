@@ -1,0 +1,26 @@
+[
+  {
+    "name": "叶斑病",
+    "keywords": ["spot", "leaf_spot", "褐色斑", "圆形斑"],
+    "color_hints": ["brown", "dark_spot", "circular"],
+    "treatment": "喷施多菌灵或代森锰锌，间隔7-10天，连续2-3次；清除落叶，减少侵染源。"
+  },
+  {
+    "name": "炭疽病",
+    "keywords": ["anthracnose", "炭疽", "凹陷斑", "轮纹"],
+    "color_hints": ["black", "sunken", "ring_pattern"],
+    "treatment": "喷施咪鲜胺或苯醚甲环唑，重点喷果实和嫩梢；及时摘除病果。"
+  },
+  {
+    "name": "腐烂病",
+    "keywords": ["rot", "腐烂", "溃烂", "软腐"],
+    "color_hints": ["dark_brown", "mushy", "oozing"],
+    "treatment": "刮除病斑涂抹石硫合剂或腐殖酸铜；加强树体营养，提高抗病力。"
+  },
+  {
+    "name": "锈病",
+    "keywords": ["rust", "锈病", "黄粉", "毛状物"],
+    "color_hints": ["orange_yellow", "powdery", "pustule"],
+    "treatment": "喷施三唑酮或腈菌唑，花前花后各一次；清除转主寄主（桧柏等）。"
+  }
+]

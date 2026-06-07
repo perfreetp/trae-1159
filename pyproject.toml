@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orchard-guard"
+version = "1.0.0"
+description = "果园病害识别命令行工具 - 批量处理巡园照片，识别病害，生成防治建议"
+requires-python = ">=3.8"
+dependencies = [
+    "click>=8.0",
+    "Pillow>=9.0",
+    "numpy>=1.20",
+    "scipy>=1.7",
+]
+
+[project.optional-dependencies]
+excel = ["openpyxl>=3.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+orchard-guard = "orchard_guard.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["orchard_guard*"]
+
+[tool.setuptools.package-data]
+orchard_guard = ["data/*.json"]
