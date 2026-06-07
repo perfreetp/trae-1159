@@ -6,13 +6,14 @@ from ..core.store import (
     load_session,
     get_sessions_by_plot,
     get_sessions_by_date_range,
+    filter_images_by_plot,
 )
 
 
 @click.command("compare")
 @click.option("--plot", "-p", default="", help="地块编号")
-@click.option("--from", "from_date", default="", help="起始日期 (YYYY-MM-DD)")
-@click.option("--to", "to_date", default="", help="结束日期 (YYYY-MM-DD)")
+@click.option("--from", "from_date", default="", help="起始巡园日期 (YYYY-MM-DD)")
+@click.option("--to", "to_date", default="", help="结束巡园日期 (YYYY-MM-DD)")
 @click.option("--session1", "-s1", default="", help="第一个会话ID")
 @click.option("--session2", "-s2", default="", help="第二个会话ID")
 @click.option("--store-dir", default="", help="数据存储目录")
@@ -28,11 +29,17 @@ def compare_command(plot, from_date, to_date, session1, session2, store_dir):
         if not sess2:
             click.echo(f"❌ 未找到会话: {session2}")
             return
+        sess1.recalculate_counts()
+        sess2.recalculate_counts()
+        if plot:
+            sess1 = filter_images_by_plot([sess1], plot)[0] if filter_images_by_plot([sess1], plot) else sess1
+            sess2 = filter_images_by_plot([sess2], plot)[0] if filter_images_by_plot([sess2], plot) else sess2
         _compare_two_sessions(sess1, sess2)
         return
 
     if plot:
         sessions = get_sessions_by_plot(plot, store_dir or None)
+        sessions = filter_images_by_plot(sessions, plot)
     elif from_date and to_date:
         sessions = get_sessions_by_date_range(from_date, to_date, store_dir or None)
     else:
@@ -44,23 +51,27 @@ def compare_command(plot, from_date, to_date, session1, session2, store_dir):
         for meta in sessions_meta:
             s = load_session(meta["id"], store_dir or None)
             if s:
+                s.recalculate_counts()
                 sessions.append(s)
+
+    for s in sessions:
+        s.recalculate_counts()
 
     if len(sessions) < 2:
         click.echo("⚠️  至少需要2次扫描会话才能比较，请先运行更多 scan")
         _list_available_sessions(sessions)
         return
 
-    sessions.sort(key=lambda s: s.scan_date or s.created_at)
+    sessions.sort(key=lambda s: s.scan_date or s.created_at[:10])
     _compare_trend(sessions)
 
 
 def _compare_two_sessions(sess1, sess2):
     click.echo("\n📊 会话对比:")
     click.echo("=" * 70)
-    click.echo(f"  会话A: {sess1.id}  日期={sess1.scan_date or sess1.created_at[:10]}  "
+    click.echo(f"  会话A: {sess1.id}  巡园日期={sess1.scan_date or sess1.created_at[:10]}  "
                f"品种={sess1.variety}  地块={sess1.plot_id}")
-    click.echo(f"  会话B: {sess2.id}  日期={sess2.scan_date or sess2.created_at[:10]}  "
+    click.echo(f"  会话B: {sess2.id}  巡园日期={sess2.scan_date or sess2.created_at[:10]}  "
                f"品种={sess2.variety}  地块={sess2.plot_id}")
     click.echo("-" * 70)
 
@@ -113,7 +124,7 @@ def _compare_trend(sessions):
     click.echo("\n📊 病害趋势分析:")
     click.echo("=" * 70)
 
-    click.echo(f"\n  {'日期':<12} {'总图片':>8} {'病害':>8} {'健康':>8} {'模糊':>8} {'发病率':>8}")
+    click.echo(f"\n  {'巡园日期':<12} {'总图片':>8} {'病害':>8} {'健康':>8} {'模糊':>8} {'发病率':>8}")
     click.echo("  " + "-" * 56)
 
     for sess in sessions:
@@ -154,6 +165,6 @@ def _list_available_sessions(sessions):
     click.echo("\n可用会话:")
     for i, s in enumerate(sessions):
         click.echo(
-            f"  [{i}] ID={s.id}  日期={s.scan_date or s.created_at[:10]}  "
+            f"  [{i}] ID={s.id}  巡园日期={s.scan_date or s.created_at[:10]}  "
             f"地块={s.plot_id}  图片={s.total_images}"
         )

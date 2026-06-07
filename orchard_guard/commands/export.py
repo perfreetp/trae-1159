@@ -7,6 +7,7 @@ from ..core.store import (
     load_session,
     list_sessions,
     get_sessions_by_plot,
+    filter_images_by_plot,
     load_config,
 )
 
@@ -58,10 +59,17 @@ def _resolve_sessions(session_id, plot, store_dir):
         if not sess:
             click.echo(f"❌ 未找到会话: {session_id}")
             return []
+        sess.recalculate_counts()
+        if plot:
+            filtered = filter_images_by_plot([sess], plot)
+            return filtered if filtered else [sess]
         return [sess]
 
     if plot:
         sessions = get_sessions_by_plot(plot, store_dir or None)
+        for s in sessions:
+            s.recalculate_counts()
+        sessions = filter_images_by_plot(sessions, plot)
         if not sessions:
             click.echo(f"❌ 未找到地块 {plot} 的记录")
             return []
@@ -75,37 +83,50 @@ def _resolve_sessions(session_id, plot, store_dir):
     for meta in sessions_meta:
         s = load_session(meta["id"], store_dir or None)
         if s:
+            s.recalculate_counts()
             sessions.append(s)
     return sessions
 
 
 def _collect_rows(sessions):
     headers = [
-        "会话ID", "扫描日期", "品种", "地块编号", "文件名", "文件路径",
-        "是否模糊", "模糊度", "病害类型", "置信度", "病斑区域",
+        "会话ID", "巡园日期", "品种", "地块编号", "文件名", "文件路径",
+        "图片尺寸", "是否模糊", "模糊度", "病害类型", "置信度", "病斑区域",
+        "病斑面积(px²)", "面积占比(%)",
         "是否修正", "原始病害",
     ]
     rows = [headers]
 
     for sess in sessions:
         for img in sess.images:
+            img_area = img.image_area()
+            size_str = f"{img.image_width}×{img.image_height}" if img_area > 0 else "-"
             if not img.detections:
                 rows.append([
                     sess.id, img.scan_date, img.variety, img.plot_id,
                     img.file_name, img.file_path,
+                    size_str,
                     "是" if img.is_blurry else "否", f"{img.blur_score:.1f}",
-                    "", "", "", "", "",
+                    "", "", "", "", "", "", "",
                 ])
             for det in img.detections:
                 bbox_str = ""
+                bbox_area = 0
+                area_pct = ""
                 if det.bbox:
                     bbox_str = f"({det.bbox.x1},{det.bbox.y1})-({det.bbox.x2},{det.bbox.y2})"
+                    bbox_area = det.bbox.area()
+                    if img_area > 0:
+                        area_pct = f"{bbox_area / img_area * 100:.2f}"
+                area_str = str(bbox_area) if bbox_area > 0 else ""
                 rows.append([
                     sess.id, img.scan_date, img.variety, img.plot_id,
                     img.file_name, img.file_path,
+                    size_str,
                     "是" if img.is_blurry else "否", f"{img.blur_score:.1f}",
                     det.disease.value, f"{det.confidence:.1%}",
                     bbox_str,
+                    area_str, area_pct,
                     "是" if det.corrected else "否",
                     det.original_disease.value if det.original_disease else "",
                 ])
@@ -133,7 +154,6 @@ def _export_xlsx(rows, output_path):
     ws = wb.active
     ws.title = "病害检测"
 
-    header_font = Font(bold=True, size=11)
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_font_white = Font(bold=True, size=11, color="FFFFFF")
     thin_border = Border(
@@ -152,7 +172,7 @@ def _export_xlsx(rows, output_path):
                 cell.font = header_font_white
                 cell.fill = header_fill
 
-    disease_col = 9
+    disease_col = 10
     for row_idx in range(2, len(rows) + 1):
         cell = ws.cell(row=row_idx, column=disease_col)
         val = cell.value

@@ -85,6 +85,7 @@ def detect_diseases(
 
     try:
         img = Image.open(image_record.file_path)
+        image_record.image_width, image_record.image_height = img.size
         arr = np.array(img)
         _analyze_image(arr, image_record, confidence_threshold)
     except Exception:
@@ -202,17 +203,20 @@ def _simulate_detections(record: ImageRecord, threshold: float):
         (DiseaseType.RUST, 0.61),
         (DiseaseType.HEALTHY, 0.80),
     ]
+
+    from PIL import Image as PILImage
+    try:
+        img = PILImage.open(record.file_path)
+        w, h_img = img.size
+        record.image_width, record.image_height = w, h_img
+    except Exception:
+        w, h_img = 800, 600
+        record.image_width, record.image_height = w, h_img
+
     for i, (dtype, base_conf) in enumerate(diseases):
         seed = (val + i * 0.17) % 1.0
         conf = round(base_conf * (0.5 + seed * 0.8), 4)
         if conf >= threshold:
-            from PIL import Image as PILImage
-
-            try:
-                img = PILImage.open(record.file_path)
-                w, h_img = img.size
-            except Exception:
-                w, h_img = 800, 600
             import random
 
             rng = random.Random(h[:8] + str(i))

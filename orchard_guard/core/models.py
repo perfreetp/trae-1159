@@ -79,6 +79,8 @@ class ImageRecord:
     variety: str = ""
     plot_id: str = ""
     scan_date: str = field(default_factory=lambda: date.today().isoformat())
+    image_width: int = 0
+    image_height: int = 0
     is_blurry: bool = False
     blur_score: float = 0.0
     detections: List[DiseaseDetection] = field(default_factory=list)
@@ -91,6 +93,8 @@ class ImageRecord:
             "variety": self.variety,
             "plot_id": self.plot_id,
             "scan_date": self.scan_date,
+            "image_width": self.image_width,
+            "image_height": self.image_height,
             "is_blurry": self.is_blurry,
             "blur_score": round(self.blur_score, 4),
             "detections": [det.to_dict() for det in self.detections],
@@ -105,6 +109,8 @@ class ImageRecord:
             variety=d.get("variety", ""),
             plot_id=d.get("plot_id", ""),
             scan_date=d.get("scan_date", date.today().isoformat()),
+            image_width=d.get("image_width", 0),
+            image_height=d.get("image_height", 0),
             is_blurry=d.get("is_blurry", False),
             blur_score=d.get("blur_score", 0.0),
         )
@@ -124,6 +130,30 @@ class ImageRecord:
             return 0.0
         return max(d.confidence for d in self.detections)
 
+    def image_area(self) -> int:
+        return self.image_width * self.image_height
+
+    def has_disease(self) -> bool:
+        return any(
+            det.disease not in (DiseaseType.HEALTHY, DiseaseType.UNKNOWN)
+            for det in self.detections
+        )
+
+    def is_healthy(self) -> bool:
+        if not self.detections:
+            return False
+        return all(
+            det.disease == DiseaseType.HEALTHY
+            for det in self.detections
+        )
+
+    def total_lesion_area(self) -> int:
+        area = 0
+        for det in self.detections:
+            if det.disease not in (DiseaseType.HEALTHY, DiseaseType.UNKNOWN) and det.bbox:
+                area += det.bbox.area()
+        return area
+
 
 @dataclass
 class ScanSession:
@@ -140,6 +170,12 @@ class ScanSession:
     blurry_count: int = 0
     disease_count: int = 0
     healthy_count: int = 0
+
+    def recalculate_counts(self):
+        self.total_images = len(self.images)
+        self.blurry_count = sum(1 for img in self.images if img.is_blurry)
+        self.disease_count = sum(1 for img in self.images if img.has_disease())
+        self.healthy_count = sum(1 for img in self.images if img.is_healthy())
 
     def to_dict(self) -> dict:
         return {

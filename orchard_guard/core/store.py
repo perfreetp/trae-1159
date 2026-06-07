@@ -2,7 +2,7 @@ import os
 import json
 from datetime import datetime
 from typing import List, Optional, Dict
-from .models import ScanSession, ImageRecord, AppConfig
+from .models import ScanSession, ImageRecord, AppConfig, DiseaseType
 
 _DEFAULT_STORE = os.path.join(os.path.expanduser("~"), ".orchard_guard")
 _SESSIONS_FILE = "sessions.json"
@@ -30,6 +30,12 @@ def _update_sessions_index(session: ScanSession, store_dir: str):
     if os.path.exists(idx_path):
         with open(idx_path, "r", encoding="utf-8") as f:
             index = json.load(f)
+    plots_in_session = set()
+    for img in session.images:
+        if img.plot_id:
+            plots_in_session.add(img.plot_id)
+    if session.plot_id:
+        plots_in_session.add(session.plot_id)
     index[session.id] = {
         "id": session.id,
         "created_at": session.created_at,
@@ -41,6 +47,7 @@ def _update_sessions_index(session: ScanSession, store_dir: str):
         "disease_count": session.disease_count,
         "healthy_count": session.healthy_count,
         "blurry_count": session.blurry_count,
+        "image_plots": sorted(plots_in_session),
     }
     with open(idx_path, "w", encoding="utf-8") as f:
         json.dump(index, f, ensure_ascii=False, indent=2)
@@ -86,6 +93,7 @@ def save_config(config: AppConfig, store_dir: Optional[str] = None) -> str:
 
 
 def update_session(session: ScanSession, store_dir: Optional[str] = None) -> str:
+    session.recalculate_counts()
     return save_session(session, store_dir)
 
 
@@ -94,7 +102,7 @@ def get_sessions_by_plot(
 ) -> List[ScanSession]:
     sessions = []
     for meta in list_sessions(store_dir):
-        if meta.get("plot_id") == plot_id:
+        if meta.get("plot_id") == plot_id or plot_id in meta.get("image_plots", []):
             s = load_session(meta["id"], store_dir)
             if s:
                 sessions.append(s)
@@ -106,23 +114,61 @@ def get_sessions_by_date_range(
 ) -> List[ScanSession]:
     sessions = []
     for meta in list_sessions(store_dir):
-        created = meta.get("created_at", "")[:10]
-        if start_date <= created <= end_date:
+        sd = meta.get("scan_date", "") or meta.get("created_at", "")[:10]
+        if start_date <= sd <= end_date:
             s = load_session(meta["id"], store_dir)
             if s:
                 sessions.append(s)
     return sessions
 
 
+def filter_images_by_plot(
+    sessions: List[ScanSession], plot_id: str
+) -> List[ScanSession]:
+    filtered = []
+    for sess in sessions:
+        matched = [img for img in sess.images if img.plot_id == plot_id]
+        if matched:
+            from .models import ScanSession as _S
+            fs = _S(
+                id=sess.id,
+                created_at=sess.created_at,
+                source_dir=sess.source_dir,
+                variety=sess.variety,
+                plot_id=plot_id,
+                scan_date=sess.scan_date,
+                images=matched,
+            )
+            fs.recalculate_counts()
+            filtered.append(fs)
+    return filtered
+
+
 def compute_summary(store_dir: Optional[str] = None) -> Dict:
-    all_sessions = list_sessions(store_dir)
-    total_scans = len(all_sessions)
-    total_images = sum(s.get("total_images", 0) for s in all_sessions)
-    total_disease = sum(s.get("disease_count", 0) for s in all_sessions)
-    total_healthy = sum(s.get("healthy_count", 0) for s in all_sessions)
-    total_blurry = sum(s.get("blurry_count", 0) for s in all_sessions)
-    plots = set(s.get("plot_id", "") for s in all_sessions if s.get("plot_id"))
-    varieties = set(s.get("variety", "") for s in all_sessions if s.get("variety"))
+    all_meta = list_sessions(store_dir)
+    total_scans = len(all_meta)
+    total_images = 0
+    total_disease = 0
+    total_healthy = 0
+    total_blurry = 0
+    plots = set()
+    varieties = set()
+
+    for meta in all_meta:
+        s = load_session(meta["id"], store_dir)
+        if not s:
+            continue
+        s.recalculate_counts()
+        total_images += s.total_images
+        total_disease += s.disease_count
+        total_healthy += s.healthy_count
+        total_blurry += s.blurry_count
+        for img in s.images:
+            if img.plot_id:
+                plots.add(img.plot_id)
+            if img.variety:
+                varieties.add(img.variety)
+
     return {
         "total_scans": total_scans,
         "total_images": total_images,
