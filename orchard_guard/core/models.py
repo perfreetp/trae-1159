@@ -17,6 +17,16 @@ class DiseaseType(Enum):
 DISEASE_NAMES_CN = {d.value: d for d in DiseaseType}
 
 
+class RiskStatus(Enum):
+    OPEN = "未处理"
+    CONFIRMED = "已确认"
+    REVIEWED = "已复查"
+    CLOSED = "已关闭"
+
+
+RISK_STATUS_CN = {s.value: s for s in RiskStatus}
+
+
 @dataclass
 class BBox:
     x1: int
@@ -291,6 +301,10 @@ class AuditLogEntry:
         default_factory=lambda: datetime.now().isoformat(timespec="seconds")
     )
     session_id: str = ""
+    operation_type: str = ""
+    operator_notes: str = ""
+    disease_count_after: int = -1
+    healthy_count_after: int = -1
     changes: List[AuditChange] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -298,6 +312,10 @@ class AuditLogEntry:
             "id": self.id,
             "timestamp": self.timestamp,
             "session_id": self.session_id,
+            "operation_type": self.operation_type,
+            "operator_notes": self.operator_notes,
+            "disease_count_after": self.disease_count_after,
+            "healthy_count_after": self.healthy_count_after,
             "changes": [c.to_dict() for c in self.changes],
         }
 
@@ -307,5 +325,111 @@ class AuditLogEntry:
             id=d.get("id", uuid.uuid4().hex[:10]),
             timestamp=d.get("timestamp", ""),
             session_id=d.get("session_id", ""),
+            operation_type=d.get("operation_type", ""),
+            operator_notes=d.get("operator_notes", ""),
+            disease_count_after=d.get("disease_count_after", -1),
+            healthy_count_after=d.get("healthy_count_after", -1),
             changes=[AuditChange.from_dict(c) for c in d.get("changes", [])],
         )
+
+
+@dataclass
+class RiskEvent:
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
+    plot_id: str = ""
+    variety: str = ""
+    disease: str = ""
+    first_trigger_date: str = ""
+    latest_trigger_date: str = ""
+    trigger_count: int = 1
+    status: str = RiskStatus.OPEN.value
+    triggers: List[str] = field(default_factory=list)
+    treatment: str = ""
+    incidence_rate: float = 0.0
+    area_pct: float = 0.0
+    growth: float = 0.0
+    risk_score: float = 0.0
+    recheck_date: str = ""
+    confirm_date: str = ""
+    confirm_notes: str = ""
+    review_date: str = ""
+    review_notes: str = ""
+    close_date: str = ""
+    responsible_notes: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "plot_id": self.plot_id,
+            "variety": self.variety,
+            "disease": self.disease,
+            "first_trigger_date": self.first_trigger_date,
+            "latest_trigger_date": self.latest_trigger_date,
+            "trigger_count": self.trigger_count,
+            "status": self.status,
+            "triggers": self.triggers,
+            "treatment": self.treatment,
+            "incidence_rate": self.incidence_rate,
+            "area_pct": self.area_pct,
+            "growth": self.growth,
+            "risk_score": self.risk_score,
+            "recheck_date": self.recheck_date,
+            "confirm_date": self.confirm_date,
+            "confirm_notes": self.confirm_notes,
+            "review_date": self.review_date,
+            "review_notes": self.review_notes,
+            "close_date": self.close_date,
+            "responsible_notes": self.responsible_notes,
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "RiskEvent":
+        return RiskEvent(
+            id=d.get("id", uuid.uuid4().hex[:10]),
+            plot_id=d.get("plot_id", ""),
+            variety=d.get("variety", ""),
+            disease=d.get("disease", ""),
+            first_trigger_date=d.get("first_trigger_date", ""),
+            latest_trigger_date=d.get("latest_trigger_date", ""),
+            trigger_count=d.get("trigger_count", 1),
+            status=d.get("status", RiskStatus.OPEN.value),
+            triggers=d.get("triggers", []),
+            treatment=d.get("treatment", ""),
+            incidence_rate=d.get("incidence_rate", 0.0),
+            area_pct=d.get("area_pct", 0.0),
+            growth=d.get("growth", 0.0),
+            risk_score=d.get("risk_score", 0.0),
+            recheck_date=d.get("recheck_date", ""),
+            confirm_date=d.get("confirm_date", ""),
+            confirm_notes=d.get("confirm_notes", ""),
+            review_date=d.get("review_date", ""),
+            review_notes=d.get("review_notes", ""),
+            close_date=d.get("close_date", ""),
+            responsible_notes=d.get("responsible_notes", ""),
+        )
+
+    @staticmethod
+    def status_sort_key(status: str) -> int:
+        order = {
+            RiskStatus.OPEN.value: 0,
+            RiskStatus.CONFIRMED.value: 1,
+            RiskStatus.REVIEWED.value: 2,
+            RiskStatus.CLOSED.value: 3,
+        }
+        return order.get(status, 4)
+
+    def recheck_priority(self) -> str:
+        if self.status == RiskStatus.CLOSED.value:
+            return "低"
+        if self.risk_score >= 80:
+            return "紧急"
+        if self.risk_score >= 50:
+            return "高"
+        if self.risk_score >= 20:
+            return "中"
+        return "低"
+
+    def processing_window(self) -> str:
+        if not self.recheck_date or self.status == RiskStatus.CLOSED.value:
+            return "-"
+        return f"{self.latest_trigger_date}~{self.recheck_date}"

@@ -1,8 +1,9 @@
 import click
-from ..core.models import DiseaseType
+from ..core.models import DiseaseType, RiskEvent, RiskStatus
 from ..core.detector import get_treatment
 from ..core.store import (
     resolve_sessions, compute_statistics, compute_priority_watch, load_config,
+    generate_risk_events, load_risk_events,
 )
 
 
@@ -28,6 +29,7 @@ def report_command(session_id, plot, store_dir):
     stats = compute_statistics(sessions)
     config = load_config(store_dir or None)
     watch = compute_priority_watch(sessions, config)
+    risk_events = generate_risk_events(sessions, config, store_dir or None)
 
     click.echo("\n" + "=" * 70)
     click.echo("📋 果园病害诊断报告")
@@ -44,6 +46,7 @@ def report_command(session_id, plot, store_dir):
     _print_disease_summary(stats)
     _print_plot_summary(stats)
     _print_variety_summary(stats)
+    _print_risk_events(risk_events, config)
     _print_priority_watch(watch, config)
     _print_treatment_list(stats)
 
@@ -146,6 +149,37 @@ def _print_variety_summary(stats):
             click.echo(f"     • {dname}: {count} 处")
 
 
+def _print_risk_events(events, config):
+    if not events:
+        return
+
+    click.echo("\n" + "-" * 70)
+    click.echo("🚨 风险事件追踪:")
+    click.echo(f"   (预警阈值: 发病率≥{config.alert_incidence_rate}%  面积占比≥{config.alert_area_ratio}%  增长≥{config.alert_growth_rate}%)")
+    click.echo()
+
+    sorted_events = sorted(events, key=lambda e: (RiskEvent.status_sort_key(e.status), -e.risk_score))
+
+    for ev in sorted_events:
+        status_icon = {"未处理": "🔴", "已确认": "🟠", "已复查": "🟡", "已关闭": "🟢"}.get(ev.status, "⚪")
+        click.echo(f"   {status_icon} [{ev.id}] 地块 {ev.plot_id}  病害={ev.disease}  状态={ev.status}")
+        click.echo(f"      首次触发: {ev.first_trigger_date}  最近触发: {ev.latest_trigger_date}  累计触发: {ev.trigger_count}次")
+        click.echo(f"      发病率={ev.incidence_rate}%  面积占比={ev.area_pct}%  增长={ev.growth:+.1f}%  风险分={ev.risk_score:.0f}")
+        click.echo(f"      触发原因: {'; '.join(ev.triggers)}")
+        click.echo(f"      防治建议: {ev.treatment}")
+        if ev.recheck_date:
+            priority = ev.recheck_priority()
+            window = ev.processing_window()
+            click.echo(f"      复查优先级: {priority}  处理窗口: {window}  建议复查: {ev.recheck_date}")
+        if ev.confirm_date:
+            click.echo(f"      确认日期: {ev.confirm_date}  备注: {ev.confirm_notes or '-'}")
+        if ev.review_date:
+            click.echo(f"      复查日期: {ev.review_date}  备注: {ev.review_notes or '-'}")
+        if ev.close_date:
+            click.echo(f"      关闭日期: {ev.close_date}  备注: {ev.responsible_notes or '-'}")
+        click.echo()
+
+
 def _print_priority_watch(watch, config):
     triggered = [w for w in watch if w["triggers"]]
     if not triggered:
@@ -156,8 +190,9 @@ def _print_priority_watch(watch, config):
     click.echo(f"   (预警阈值: 发病率≥{config.alert_incidence_rate}%  面积占比≥{config.alert_area_ratio}%  增长≥{config.alert_growth_rate}%)")
     click.echo()
     for w in triggered:
+        growth_str = "从0新增" if w.get("is_new_disease") else f"{w['growth']:+.1f}%"
         click.echo(f"   📍 地块 {w['plot_id']}  品种={w['variety']}")
-        click.echo(f"      主要病害: {w['primary_disease']}  发病率={w['incidence_rate']}%  面积占比={w['area_pct']}%  增长={w['growth']:+.1f}%")
+        click.echo(f"      主要病害: {w['primary_disease']}  发病率={w['incidence_rate']}%  面积占比={w['area_pct']}%  增长={growth_str}")
         click.echo(f"      触发原因: {'; '.join(w['triggers'])}")
         click.echo(f"      防治建议: {w['treatment']}")
         if w["recheck_date"]:

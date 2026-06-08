@@ -1,0 +1,109 @@
+{
+  "id": "55c8951f",
+  "created_at": "2026-06-08T08:09:31",
+  "source_dir": "E:\\trae-bz\\TraeProjects\\1159\\test_orchard",
+  "variety": "",
+  "plot_id": "",
+  "scan_date": "2024-06-01",
+  "images": [
+    {
+      "id": "32827f00f55a",
+      "file_path": "E:\\trae-bz\\TraeProjects\\1159\\test_orchard\\品种_嘎啦\\地块_A1\\dark_leaf.jpg",
+      "file_name": "dark_leaf.jpg",
+      "variety": "嘎啦",
+      "plot_id": "A1",
+      "scan_date": "2024-06-01",
+      "image_width": 600,
+      "image_height": 400,
+      "is_blurry": true,
+      "blur_score": 13.7407,
+      "detections": [
+        {
+          "disease": "炭疽病",
+          "confidence": 0.9,
+          "corrected": false,
+          "bbox": {
+            "x1": 300,
+            "y1": 50,
+            "x2": 479,
+            "y2": 179
+          }
+        }
+      ]
+    },
+    {
+      "id": "c94c0903848a",
+      "file_path": "E:\\trae-bz\\TraeProjects\\1159\\test_orchard\\品种_红富士\\地块_A1\\brown_leaf.jpg",
+      "file_name": "brown_leaf.jpg",
+      "variety": "红富士",
+      "plot_id": "A1",
+      "scan_date": "2024-06-01",
+      "image_width": 600,
+      "image_height": 400,
+      "is_blurry": true,
+      "blur_score": 0.5142,
+      "detections": [
+        {
+          "disease": "叶斑病",
+          "confidence": 0.95,
+          "corrected": false,
+          "bbox": {
+            "x1": 200,
+            "y1": 99,
+            "x2": 350,
+            "y2": 249
+          }
+        }
+      ]
+    },
+    {
+      "id": "1ad791144dd0",
+      "file_path": "E:\\trae-bz\\TraeProjects\\1159\\test_orchard\\品种_红富士\\地块_A1\\green_leaf.jpg",
+      "file_name": "green_leaf.jpg",
+      "variety": "红富士",
+      "plot_id": "A1",
+      "scan_date": "2024-06-01",
+      "image_width": 600,
+      "image_height": 400,
+      "is_blurry": true,
+      "blur_score": 0.0,
+      "detections": [
+        {
+          "disease": "锈病",
+          "confidence": 0.7,
+          "corrected": true,
+          "original_disease": "健康"
+        }
+      ]
+    },
+    {
+      "id": "5d73e0ee1e7b",
+      "file_path": "E:\\trae-bz\\TraeProjects\\1159\\test_orchard\\品种_红富士\\地块_B2\\rust_leaf.jpg",
+      "file_name": "rust_leaf.jpg",
+      "variety": "红富士",
+      "plot_id": "B2",
+      "scan_date": "2024-06-01",
+      "image_width": 600,
+      "image_height": 400,
+      "is_blurry": true,
+      "blur_score": 22.7505,
+      "detections": [
+        {
+          "disease": "锈病",
+          "confidence": 0.88,
+          "corrected": false,
+          "bbox": {
+            "x1": 100,
+            "y1": 80,
+            "x2": 279,
+            "y2": 199
+          }
+        }
+      ]
+    }
+  ],
+  "total_images": 4,
+  "blurry_count": 4,
+  "disease_count": 4,
+  "healthy_count": 0
+}

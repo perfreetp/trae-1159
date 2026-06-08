@@ -1,6 +1,6 @@
 import click
 from collections import defaultdict
-from ..core.models import DiseaseType
+from ..core.models import DiseaseType, RiskEvent, RiskStatus
 from ..core.detector import get_treatment
 from ..core.store import (
     resolve_sessions,
@@ -8,6 +8,7 @@ from ..core.store import (
     load_session,
     load_config,
     compute_priority_watch,
+    generate_risk_events,
 )
 
 
@@ -17,8 +18,9 @@ from ..core.store import (
 @click.option("--to", "to_date", default="", help="结束巡园日期 (YYYY-MM-DD)")
 @click.option("--session1", "-s1", default="", help="第一个会话ID")
 @click.option("--session2", "-s2", default="", help="第二个会话ID")
+@click.option("--disease", "-d", default="", help="指定病害查看复盘趋势")
 @click.option("--store-dir", default="", help="数据存储目录")
-def compare_command(plot, from_date, to_date, session1, session2, store_dir):
+def compare_command(plot, from_date, to_date, session1, session2, disease, store_dir):
     """比较不同日期的病害扩散情况"""
 
     if session1 and session2:
@@ -44,7 +46,10 @@ def compare_command(plot, from_date, to_date, session1, session2, store_dir):
         _list_available(sessions)
         return
 
-    _compare_trend(sessions, plot, store_dir)
+    if disease:
+        _compare_disease_review(sessions, disease, plot, store_dir)
+    else:
+        _compare_trend(sessions, plot, store_dir)
 
 
 def _compare_two_sessions(s1_id, s2_id, plot, store_dir):
@@ -157,12 +162,13 @@ def _compare_trend(sessions, plot_filter, store_dir):
                 raw_disease_trend[dname][d] = 0
 
     click.echo(f"\n  🦠 各病害变化趋势 (补齐0值):")
-    fastest_disease = None
-    fastest_disease_rate = -999
+    new_diseases = []
+    regular_growth = []
     for dname in sorted(all_disease_names):
         points = raw_disease_trend[dname]
         ordered = [points[d] for d in all_dates]
         first_c, last_c = ordered[0], ordered[-1]
+        is_new = first_c == 0 and last_c > 0
         if first_c > 0:
             growth = (last_c - first_c) / first_c * 100
         elif last_c > 0:
@@ -170,14 +176,25 @@ def _compare_trend(sessions, plot_filter, store_dir):
         else:
             growth = 0
         trend = "📈上升" if last_c > first_c else ("📉下降" if last_c < first_c else "➡️持平")
+        if is_new:
+            trend = "🆕从0新增"
         dates_str = " → ".join(f"{d}({points[d]})" for d in all_dates)
         click.echo(f"  • {dname}: {dates_str}  {trend}")
-        if growth > fastest_disease_rate and growth != float("inf"):
-            fastest_disease_rate = growth
-            fastest_disease = dname
-        if growth == float("inf") and fastest_disease_rate < 0:
-            fastest_disease = dname
-            fastest_disease_rate = growth
+        if is_new:
+            new_diseases.append((dname, growth))
+        else:
+            regular_growth.append((dname, growth))
+
+    fastest_disease = None
+    fastest_growth_str = ""
+    if new_diseases:
+        fastest_disease = new_diseases[0][0]
+        fastest_growth_str = "从0新增"
+    elif regular_growth:
+        best = max(regular_growth, key=lambda x: x[1])
+        if best[1] > 0:
+            fastest_disease = best[0]
+            fastest_growth_str = f"+{best[1]:.0f}%"
 
     if not plot_filter and len(sessions) >= 2:
         click.echo(f"\n  🗺️ 各地块发病率变化:")
@@ -224,8 +241,7 @@ def _compare_trend(sessions, plot_filter, store_dir):
             click.echo(f"\n  ⚡ 增长最快地块: {fastest_plot} (发病率增加 {fastest_plot_rate:+.1f}%)")
 
     if fastest_disease:
-        growth_str = f"+{fastest_disease_rate:.0f}%" if fastest_disease_rate != float("inf") else "从0新增"
-        click.echo(f"  ⚡ 增长最快病害: {fastest_disease} ({growth_str})")
+        click.echo(f"  ⚡ 增长最快病害: {fastest_disease} ({fastest_growth_str})")
 
     overall_risk = _assess_risk(first_rate, last_rate)
     click.echo(f"\n  🚨 总体风险等级: {overall_risk}")
@@ -239,14 +255,138 @@ def _compare_trend(sessions, plot_filter, store_dir):
         click.echo("  建议: 维持现有防治方案")
 
     watch = compute_priority_watch(sessions, config)
+    risk_events = generate_risk_events(sessions, config, store_dir or None)
+
     triggered = [w for w in watch if w["triggers"]]
     if triggered:
         click.echo(f"\n  🚨 重点巡查地块 (阈值: 发病率≥{config.alert_incidence_rate}%  面积占比≥{config.alert_area_ratio}%  增长≥{config.alert_growth_rate}%):")
         for w in triggered:
-            click.echo(f"  📍 地块 {w['plot_id']}  主要病害={w['primary_disease']}  发病率={w['incidence_rate']}%  增长={w['growth']:+.1f}%")
+            growth_str = "从0新增" if w.get("is_new_disease") else f"{w['growth']:+.1f}%"
+            click.echo(f"  📍 地块 {w['plot_id']}  主要病害={w['primary_disease']}  发病率={w['incidence_rate']}%  增长={growth_str}")
             click.echo(f"     触发: {'; '.join(w['triggers'])}  防治: {w['treatment']}")
             if w["recheck_date"]:
                 click.echo(f"     建议复查: {w['recheck_date']}")
+
+    active_risks = [e for e in risk_events if e.status != "已关闭"]
+    if active_risks:
+        click.echo(f"\n  🚨 风险事件:")
+        for ev in sorted(active_risks, key=lambda e: (RiskEvent.status_sort_key(e.status), -e.risk_score)):
+            status_icon = {"未处理": "🔴", "已确认": "🟠", "已复查": "🟡"}.get(ev.status, "⚪")
+            click.echo(f"  {status_icon} [{ev.id}] 地块 {ev.plot_id} {ev.disease}  状态={ev.status}  触发{ev.trigger_count}次")
+
+
+def _compare_disease_review(sessions, disease_name, plot_filter, store_dir):
+    config = load_config(store_dir or None)
+
+    click.echo(f"\n📊 病害复盘: {disease_name}")
+    click.echo("=" * 70)
+    if plot_filter:
+        click.echo(f"  地块: {plot_filter}")
+    click.echo()
+
+    all_dates = [s.scan_date or s.created_at[:10] for s in sessions]
+
+    plot_disease_trend = defaultdict(dict)
+    variety_disease_trend = defaultdict(dict)
+    all_plot_ids = set()
+    all_varieties = set()
+
+    for sess in sessions:
+        d = sess.scan_date or sess.created_at[:10]
+        plot_counts = defaultdict(int)
+        variety_counts = defaultdict(int)
+
+        for img in sess.images:
+            pid = img.plot_id or sess.plot_id or "未知地块"
+            var = img.variety or sess.variety or "未知品种"
+            all_plot_ids.add(pid)
+            all_varieties.add(var)
+
+            for det in img.detections:
+                if det.disease.value == disease_name:
+                    plot_counts[pid] += 1
+                    variety_counts[var] += 1
+
+        for pid in all_plot_ids:
+            plot_disease_trend[pid][d] = plot_counts.get(pid, 0)
+        for var in all_varieties:
+            variety_disease_trend[var][d] = variety_counts.get(var, 0)
+
+    for pid in all_plot_ids:
+        for d in all_dates:
+            if d not in plot_disease_trend[pid]:
+                plot_disease_trend[pid][d] = 0
+    for var in all_varieties:
+        for d in all_dates:
+            if d not in variety_disease_trend[var]:
+                variety_disease_trend[var][d] = 0
+
+    click.echo("  🗺️ 各地块趋势:")
+    click.echo(f"  {'地块':<10} {'趋势':<50} {'结论'}")
+    click.echo("  " + "-" * 80)
+
+    for pid in sorted(all_plot_ids):
+        points = plot_disease_trend[pid]
+        ordered = [points[d] for d in all_dates]
+        conclusion = _disease_conclusion(ordered)
+        dates_str = " → ".join(f"{d}({points[d]})" for d in all_dates)
+        click.echo(f"  {pid:<10} {dates_str:<50} {conclusion}")
+
+    click.echo(f"\n  🌳 各品种趋势:")
+    click.echo(f"  {'品种':<10} {'趋势':<50} {'结论'}")
+    click.echo("  " + "-" * 80)
+
+    for var in sorted(all_varieties):
+        points = variety_disease_trend[var]
+        ordered = [points[d] for d in all_dates]
+        conclusion = _disease_conclusion(ordered)
+        dates_str = " → ".join(f"{d}({points[d]})" for d in all_dates)
+        click.echo(f"  {var:<10} {dates_str:<50} {conclusion}")
+
+    treatment = get_treatment(disease_name)
+    click.echo(f"\n  💊 {disease_name} 防治方案: {treatment}")
+
+    watch = compute_priority_watch(sessions, config)
+    relevant = [w for w in watch if w["primary_disease"] == disease_name and w["triggers"]]
+    if relevant:
+        click.echo(f"\n  🚨 {disease_name} 相关预警:")
+        for w in relevant:
+            click.echo(f"     地块 {w['plot_id']}  发病率={w['incidence_rate']}%  增长={w['growth']:+.1f}%  触发: {'; '.join(w['triggers'])}")
+
+
+def _disease_conclusion(ordered_counts):
+    if all(c == 0 for c in ordered_counts):
+        return "➡️ 未检出"
+
+    nonzero = [c for c in ordered_counts if c > 0]
+    if len(nonzero) == len(ordered_counts):
+        if all(c == ordered_counts[0] for c in ordered_counts):
+            return "🔴 持续高发"
+        if ordered_counts[-1] > ordered_counts[0]:
+            return "📈 加重"
+        if ordered_counts[-1] < ordered_counts[0]:
+            return "📉 持续消退"
+        return "➡️ 持平"
+
+    first_nz_idx = next(i for i, c in enumerate(ordered_counts) if c > 0)
+    if first_nz_idx > 0:
+        has_zero_after = any(c == 0 for c in ordered_counts[first_nz_idx:])
+        if has_zero_after:
+            return "🔄 复发"
+        return "🆕 新增"
+
+    if ordered_counts[-1] == 0:
+        return "📉 消退"
+
+    has_zero_between = any(c == 0 for c in ordered_counts[1:-1])
+    if has_zero_between:
+        return "🔄 复发"
+
+    if ordered_counts[-1] > ordered_counts[0]:
+        return "📈 加重"
+    if ordered_counts[-1] < ordered_counts[0]:
+        return "📉 消退"
+    return "➡️ 持平"
 
 
 def _compute_disease_stats(sess) -> dict:

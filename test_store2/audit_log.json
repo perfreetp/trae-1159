@@ -1,0 +1,22 @@
+[
+  {
+    "id": "9df4000072",
+    "timestamp": "2026-06-08T08:11:14",
+    "session_id": "55c8951f",
+    "operation_type": "批量修正",
+    "operator_notes": "批量修正：健康误判为锈病",
+    "disease_count_after": 4,
+    "healthy_count_after": 0,
+    "changes": [
+      {
+        "image_idx": 2,
+        "image_name": "green_leaf.jpg",
+        "det_idx": 0,
+        "old_disease": "健康",
+        "new_disease": "锈病",
+        "old_confidence": 0.95,
+        "new_confidence": 0.7
+      }
+    ]
+  }
+]

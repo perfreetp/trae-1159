@@ -1,6 +1,9 @@
 import click
-from ..core.models import AppConfig
-from ..core.store import load_config, save_config, compute_summary, list_sessions
+from ..core.models import AppConfig, RiskEvent, RiskStatus
+from ..core.store import (
+    load_config, save_config, compute_summary, list_sessions,
+    load_risk_events, update_risk_event,
+)
 
 
 @click.command("config")
@@ -12,6 +15,11 @@ from ..core.store import load_config, save_config, compute_summary, list_session
 @click.option("--alert-incidence", type=float, default=None, help="预警: 发病率阈值(%)")
 @click.option("--alert-area", type=float, default=None, help="预警: 面积占比阈值(%)")
 @click.option("--alert-growth", type=float, default=None, help="预警: 增长幅度阈值(%)")
+@click.option("--risk-list", is_flag=True, help="查看风险事件列表")
+@click.option("--risk-confirm", type=str, default="", help="确认风险事件 (事件ID)")
+@click.option("--risk-review", type=str, default="", help="标记风险事件已复查 (事件ID)")
+@click.option("--risk-close", type=str, default="", help="关闭风险事件 (事件ID)")
+@click.option("--risk-notes", type=str, default="", help="风险操作备注")
 @click.option("--store-dir", default="", help="数据存储目录")
 @click.option("--show", is_flag=True, help="显示当前配置")
 @click.option("--summary", is_flag=True, help="打印处理摘要")
@@ -19,9 +27,10 @@ from ..core.store import load_config, save_config, compute_summary, list_session
 def config_command(
     confidence, blur_threshold, default_variety, default_plot,
     export_format, alert_incidence, alert_area, alert_growth,
+    risk_list, risk_confirm, risk_review, risk_close, risk_notes,
     store_dir, show, summary, reset
 ):
-    """保存常用阈值，查看配置，打印处理摘要"""
+    """保存常用阈值，查看配置，打印处理摘要，管理风险事件"""
 
     config = load_config(store_dir or None)
 
@@ -30,6 +39,34 @@ def config_command(
         save_config(config, store_dir or None)
         click.echo("✅ 已恢复默认配置")
         _show_config(config)
+        return
+
+    if risk_list:
+        _list_risk_events(store_dir)
+        return
+
+    if risk_confirm:
+        ev = update_risk_event(risk_confirm, RiskStatus.CONFIRMED.value, risk_notes, store_dir or None)
+        if ev:
+            click.echo(f"✅ 风险事件 [{ev.id}] 已确认  地块={ev.plot_id} 病害={ev.disease}")
+        else:
+            click.echo(f"❌ 未找到风险事件: {risk_confirm}")
+        return
+
+    if risk_review:
+        ev = update_risk_event(risk_review, RiskStatus.REVIEWED.value, risk_notes, store_dir or None)
+        if ev:
+            click.echo(f"✅ 风险事件 [{ev.id}] 已标记复查  地块={ev.plot_id} 病害={ev.disease}")
+        else:
+            click.echo(f"❌ 未找到风险事件: {risk_review}")
+        return
+
+    if risk_close:
+        ev = update_risk_event(risk_close, RiskStatus.CLOSED.value, risk_notes, store_dir or None)
+        if ev:
+            click.echo(f"✅ 风险事件 [{ev.id}] 已关闭  地块={ev.plot_id} 病害={ev.disease}")
+        else:
+            click.echo(f"❌ 未找到风险事件: {risk_close}")
         return
 
     changed = False
@@ -116,3 +153,49 @@ def _print_summary(store_dir):
                 f"品种={r.get('variety', '-')}  地块={r.get('plot_id', '-')}  "
                 f"图片={r.get('total_images', 0)}"
             )
+
+    events = load_risk_events(store_dir or None)
+    if events:
+        open_count = sum(1 for e in events if e.status == RiskStatus.OPEN.value)
+        confirmed_count = sum(1 for e in events if e.status == RiskStatus.CONFIRMED.value)
+        reviewed_count = sum(1 for e in events if e.status == RiskStatus.REVIEWED.value)
+        closed_count = sum(1 for e in events if e.status == RiskStatus.CLOSED.value)
+        click.echo(f"\n   风险事件: 未处理={open_count}  已确认={confirmed_count}  已复查={reviewed_count}  已关闭={closed_count}")
+
+
+def _list_risk_events(store_dir):
+    events = load_risk_events(store_dir or None)
+    if not events:
+        click.echo("📭 暂无风险事件")
+        return
+
+    click.echo("\n🚨 风险事件列表:")
+    click.echo("=" * 70)
+
+    sorted_events = sorted(events, key=lambda e: (RiskEvent.status_sort_key(e.status), -e.risk_score))
+
+    for ev in sorted_events:
+        status_icon = {
+            RiskStatus.OPEN.value: "🔴",
+            RiskStatus.CONFIRMED.value: "🟠",
+            RiskStatus.REVIEWED.value: "🟡",
+            RiskStatus.CLOSED.value: "🟢",
+        }.get(ev.status, "⚪")
+
+        click.echo(f"\n  {status_icon} [{ev.id}] 地块 {ev.plot_id}  病害={ev.disease}  状态={ev.status}")
+        click.echo(f"     首次触发: {ev.first_trigger_date}  最近触发: {ev.latest_trigger_date}  累计: {ev.trigger_count}次")
+        click.echo(f"     发病率={ev.incidence_rate}%  面积占比={ev.area_pct}%  增长={ev.growth:+.1f}%  风险分={ev.risk_score:.0f}")
+        click.echo(f"     触发: {'; '.join(ev.triggers)}")
+        click.echo(f"     防治: {ev.treatment}")
+        if ev.recheck_date:
+            click.echo(f"     复查优先级: {ev.recheck_priority()}  处理窗口: {ev.processing_window()}  建议复查: {ev.recheck_date}")
+        if ev.confirm_date:
+            click.echo(f"     确认: {ev.confirm_date}  备注: {ev.confirm_notes or '-'}")
+        if ev.review_date:
+            click.echo(f"     复查: {ev.review_date}  备注: {ev.review_notes or '-'}")
+        if ev.close_date:
+            click.echo(f"     关闭: {ev.close_date}  备注: {ev.responsible_notes or '-'}")
+
+    click.echo()
+    click.echo(f"  共 {len(events)} 条风险事件")
+    click.echo("  操作: --risk-confirm <ID> 确认  --risk-review <ID> 复查  --risk-close <ID> 关闭  --risk-notes <备注>")

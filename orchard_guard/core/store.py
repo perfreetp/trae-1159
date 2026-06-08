@@ -6,12 +6,14 @@ from collections import defaultdict
 from .models import (
     ScanSession, ImageRecord, AppConfig, DiseaseType,
     AuditLogEntry, AuditChange, DISEASE_NAMES_CN,
+    RiskEvent, RiskStatus,
 )
 
 _DEFAULT_STORE = os.path.join(os.path.expanduser("~"), ".orchard_guard")
 _SESSIONS_FILE = "sessions.json"
 _CONFIG_FILE = "config.json"
 _AUDIT_FILE = "audit_log.json"
+_RISK_FILE = "risk_events.json"
 
 
 def _ensure_store(store_dir: Optional[str] = None) -> str:
@@ -326,6 +328,72 @@ def compute_statistics(sessions: List[ScanSession]) -> Dict:
     }
 
 
+def _compute_plot_growth_per_disease(sessions: List[ScanSession], plot_id: str):
+    from .detector import get_treatment
+
+    plot_sessions = []
+    for sess in sessions:
+        matched = [img for img in sess.images if img.plot_id == plot_id or (not img.plot_id and sess.plot_id == plot_id)]
+        if matched:
+            plot_sessions.append((sess.scan_date or sess.created_at[:10], matched))
+
+    plot_sessions.sort(key=lambda x: x[0])
+
+    disease_by_date = defaultdict(dict)
+    all_disease_names = set()
+    for sd, imgs in plot_sessions:
+        counts = defaultdict(int)
+        for img in imgs:
+            for det in img.detections:
+                if det.disease not in (DiseaseType.HEALTHY, DiseaseType.UNKNOWN):
+                    counts[det.disease.value] += 1
+        for dname, c in counts.items():
+            disease_by_date[dname][sd] = c
+            all_disease_names.add(dname)
+
+    all_dates = [sd for sd, _ in plot_sessions]
+    for dname in all_disease_names:
+        for d in all_dates:
+            if d not in disease_by_date[dname]:
+                disease_by_date[dname][d] = 0
+
+    growth_info = {}
+    for dname in all_disease_names:
+        ordered = [disease_by_date[dname].get(d, 0) for d in all_dates]
+        first_c, last_c = ordered[0], ordered[-1]
+        is_new = first_c == 0 and last_c > 0
+        if first_c > 0:
+            growth_pct = (last_c - first_c) / first_c * 100
+        elif last_c > 0:
+            growth_pct = float("inf")
+        else:
+            growth_pct = 0
+        growth_info[dname] = {
+            "first_count": first_c,
+            "last_count": last_c,
+            "growth_pct": growth_pct,
+            "is_new": is_new,
+            "trend": disease_by_date[dname],
+        }
+
+    total_first = sum(1 for _, imgs in plot_sessions[:1] for img in imgs if img.has_disease())
+    total_last = sum(1 for _, imgs in plot_sessions[-1:] for img in imgs if img.has_disease())
+    total_first_all = sum(len(imgs) for _, imgs in plot_sessions[:1])
+    total_last_all = sum(len(imgs) for _, imgs in plot_sessions[-1:])
+
+    first_rate = total_first / max(1, total_first_all) * 100
+    last_rate = total_last / max(1, total_last_all) * 100
+    overall_growth = last_rate - first_rate
+
+    return {
+        "growth_info": growth_info,
+        "overall_growth": overall_growth,
+        "first_rate": first_rate,
+        "last_rate": last_rate,
+        "all_dates": all_dates,
+    }
+
+
 def compute_priority_watch(
     sessions: List[ScanSession], config: AppConfig
 ) -> List[Dict]:
@@ -336,7 +404,8 @@ def compute_priority_watch(
 
     plot_data = defaultdict(lambda: {
         "total": 0, "disease": 0, "lesion_area": 0, "image_area": 0,
-        "variety": "", "latest_date": "", "diseases": defaultdict(int),
+        "variety": "", "latest_date": "", "first_date": "",
+        "diseases": defaultdict(int),
     })
 
     for sess in sessions:
@@ -346,7 +415,10 @@ def compute_priority_watch(
             var = img.variety or sess.variety or "未知品种"
             pd = plot_data[pid]
             pd["total"] += 1
-            pd["latest_date"] = max(pd["latest_date"], sd)
+            if not pd["latest_date"] or sd > pd["latest_date"]:
+                pd["latest_date"] = sd
+            if not pd["first_date"] or sd < pd["first_date"]:
+                pd["first_date"] = sd
             if not pd["variety"]:
                 pd["variety"] = var
             img_area = img.image_area()
@@ -367,12 +439,16 @@ def compute_priority_watch(
         treatment = get_treatment(primary) if primary != "-" else "-"
 
         growth = 0.0
+        growth_info = {}
+        is_new_disease = False
         if len(sessions) >= 2:
-            first = sessions[0]
-            last = sessions[-1]
-            first_rate = first.disease_count / max(1, first.total_images) * 100
-            last_rate = last.disease_count / max(1, last.total_images) * 100
-            growth = last_rate - first_rate
+            pg = _compute_plot_growth_per_disease(sessions, pid)
+            growth = pg["overall_growth"]
+
+            for dname, gi in pg["growth_info"].items():
+                if gi["is_new"]:
+                    is_new_disease = True
+                growth_info[dname] = gi
 
         triggers = []
         if rate >= config.alert_incidence_rate:
@@ -403,9 +479,12 @@ def compute_priority_watch(
             "variety": pd["variety"],
             "primary_disease": primary,
             "latest_date": pd["latest_date"],
+            "first_date": pd.get("first_date", ""),
             "incidence_rate": round(rate, 1),
             "area_pct": round(area_pct, 2),
             "growth": round(growth, 1),
+            "is_new_disease": is_new_disease,
+            "growth_info": growth_info,
             "triggers": triggers,
             "risk_score": risk_score,
             "treatment": treatment,
@@ -414,6 +493,115 @@ def compute_priority_watch(
 
     watch.sort(key=lambda x: -x["risk_score"])
     return watch
+
+
+def generate_risk_events(sessions: List[ScanSession], config: AppConfig, store_dir: Optional[str] = None) -> List[RiskEvent]:
+    from .detector import get_treatment
+
+    watch = compute_priority_watch(sessions, config)
+    existing = load_risk_events(store_dir)
+    existing_map = {}
+    for ev in existing:
+        if ev.status != RiskStatus.CLOSED.value:
+            existing_map[(ev.plot_id, ev.disease)] = ev
+
+    latest_date = ""
+    for sess in sessions:
+        sd = sess.scan_date or sess.created_at[:10]
+        if sd > latest_date:
+            latest_date = sd
+
+    new_events = []
+    for w in watch:
+        if not w["triggers"]:
+            continue
+
+        disease = w["primary_disease"]
+        key = (w["plot_id"], disease)
+        if key in existing_map:
+            ev = existing_map[key]
+            ev.latest_trigger_date = w["latest_date"]
+            ev.trigger_count += 1
+            ev.triggers = w["triggers"]
+            ev.incidence_rate = w["incidence_rate"]
+            ev.area_pct = w["area_pct"]
+            ev.growth = w["growth"]
+            ev.risk_score = w["risk_score"]
+            ev.is_new_disease = w.get("is_new_disease", False)
+            try:
+                from datetime import datetime as _dt
+                ev.recheck_date = (_dt.strptime(w["latest_date"], "%Y-%m-%d") + timedelta(days=7)).strftime("%Y-%m-%d")
+            except Exception:
+                ev.recheck_date = ""
+            if ev.status == RiskStatus.REVIEWED.value:
+                ev.status = RiskStatus.OPEN.value
+            new_events.append(ev)
+        else:
+            ev = RiskEvent(
+                plot_id=w["plot_id"],
+                variety=w["variety"],
+                disease=disease,
+                first_trigger_date=w["latest_date"],
+                latest_trigger_date=w["latest_date"],
+                trigger_count=1,
+                status=RiskStatus.OPEN.value,
+                triggers=w["triggers"],
+                treatment=w["treatment"],
+                incidence_rate=w["incidence_rate"],
+                area_pct=w["area_pct"],
+                growth=w["growth"],
+                risk_score=w["risk_score"],
+                recheck_date=w.get("recheck_date", ""),
+            )
+            new_events.append(ev)
+
+    all_events = [ev for ev in existing if ev.status == RiskStatus.CLOSED.value]
+    all_events.extend(new_events)
+    save_risk_events(all_events, store_dir)
+    return new_events
+
+
+def load_risk_events(store_dir: Optional[str] = None) -> List[RiskEvent]:
+    d = _ensure_store(store_dir)
+    risk_path = os.path.join(d, _RISK_FILE)
+    if not os.path.exists(risk_path):
+        return []
+    with open(risk_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return [RiskEvent.from_dict(e) for e in data]
+
+
+def save_risk_events(events: List[RiskEvent], store_dir: Optional[str] = None):
+    d = _ensure_store(store_dir)
+    risk_path = os.path.join(d, _RISK_FILE)
+    with open(risk_path, "w", encoding="utf-8") as f:
+        json.dump([e.to_dict() for e in events], f, ensure_ascii=False, indent=2)
+
+
+def update_risk_event(event_id: str, status: str, notes: str = "", store_dir: Optional[str] = None) -> Optional[RiskEvent]:
+    events = load_risk_events(store_dir)
+    target = None
+    for ev in events:
+        if ev.id == event_id:
+            target = ev
+            break
+    if not target:
+        return None
+
+    now = datetime.now().isoformat(timespec="seconds")[:10]
+    target.status = status
+    if status == RiskStatus.CONFIRMED.value:
+        target.confirm_date = now
+        target.confirm_notes = notes
+    elif status == RiskStatus.REVIEWED.value:
+        target.review_date = now
+        target.review_notes = notes
+    elif status == RiskStatus.CLOSED.value:
+        target.close_date = now
+        target.responsible_notes = notes
+
+    save_risk_events(events, store_dir)
+    return target
 
 
 def save_audit_log(entry: AuditLogEntry, store_dir: Optional[str] = None):
@@ -460,8 +648,21 @@ def undo_last_audit(session_id: str, store_dir: Optional[str] = None) -> Optiona
                 det = img.detections[change.det_idx]
                 det.disease = DISEASE_NAMES_CN.get(change.old_disease, DiseaseType.UNKNOWN)
                 det.confidence = change.old_confidence
-                det.corrected = False
-                det.original_disease = None
+
+                prior_changes = []
+                for i in range(target_idx):
+                    for c in log[i].changes:
+                        if c.image_idx == change.image_idx and c.det_idx == change.det_idx:
+                            prior_changes.append(c)
+
+                if prior_changes:
+                    det.corrected = True
+                    det.original_disease = DISEASE_NAMES_CN.get(
+                        prior_changes[0].old_disease, DiseaseType.UNKNOWN
+                    )
+                else:
+                    det.corrected = False
+                    det.original_disease = None
 
     update_session(sess, store_dir)
     log.pop(target_idx)

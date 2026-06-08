@@ -1,11 +1,11 @@
 import os
 import csv
 import click
-from ..core.models import DiseaseType
+from ..core.models import DiseaseType, RiskEvent, RiskStatus
 from ..core.detector import get_treatment
 from ..core.store import (
     resolve_sessions, compute_statistics, compute_priority_watch,
-    load_config,
+    load_config, load_risk_events,
 )
 
 
@@ -58,10 +58,10 @@ def export_command(session_id, plot, output, fmt, mode, store_dir):
             output = f"果园病害_全部.{export_fmt}"
 
     if export_fmt == "xlsx":
-        _export_xlsx(sessions, output, config)
+        _export_xlsx(sessions, output, config, store_dir)
     else:
         if mode == "summary":
-            _export_csv_summary(sessions, output, config)
+            _export_csv_summary(sessions, output, config, store_dir)
         else:
             _export_csv_detail(sessions, output)
 
@@ -183,20 +183,65 @@ def _collect_disease_summary_rows(stats):
     return rows
 
 
-def _collect_priority_watch_rows(watch):
+def _collect_priority_watch_rows(watch, risk_events=None):
     headers = [
         "地块编号", "品种", "主要病害", "最近巡园日期",
         "发病率(%)", "面积占比(%)", "增长幅度(%)",
         "触发原因", "防治建议", "建议复查日期",
+        "复查优先级", "建议处理窗口", "风险状态",
+        "确认日期", "确认备注", "复查日期", "复查备注",
+        "负责人备注",
     ]
     rows = [headers]
+
+    risk_map = {}
+    if risk_events:
+        for ev in risk_events:
+            key = (ev.plot_id, ev.disease)
+            risk_map[key] = ev
+
+    watch_with_sort = []
     for w in watch:
-        if w["triggers"]:
-            rows.append([
-                w["plot_id"], w["variety"], w["primary_disease"], w["latest_date"],
-                w["incidence_rate"], w["area_pct"], w["growth"],
-                "; ".join(w["triggers"]), w["treatment"], w["recheck_date"],
-            ])
+        if not w["triggers"]:
+            continue
+        key = (w["plot_id"], w["primary_disease"])
+        ev = risk_map.get(key)
+        sort_key = 99
+        if ev:
+            sort_key = RiskEvent.status_sort_key(ev.status)
+        watch_with_sort.append((sort_key, -w["risk_score"], w, ev))
+
+    watch_with_sort.sort(key=lambda x: (x[0], x[1]))
+
+    for _, _, w, ev in watch_with_sort:
+        growth_str = "从0新增" if w.get("is_new_disease") else f"{w['growth']:+.1f}%"
+        priority = "-"
+        window = "-"
+        status = "未处理"
+        confirm_date = ""
+        confirm_notes = ""
+        review_date = ""
+        review_notes = ""
+        responsible_notes = ""
+
+        if ev:
+            priority = ev.recheck_priority()
+            window = ev.processing_window()
+            status = ev.status
+            confirm_date = ev.confirm_date
+            confirm_notes = ev.confirm_notes
+            review_date = ev.review_date
+            review_notes = ev.review_notes
+            responsible_notes = ev.responsible_notes
+
+        rows.append([
+            w["plot_id"], w["variety"], w["primary_disease"], w["latest_date"],
+            w["incidence_rate"], w["area_pct"], growth_str,
+            "; ".join(w["triggers"]), w["treatment"], w["recheck_date"],
+            priority, window, status,
+            confirm_date, confirm_notes, review_date, review_notes,
+            responsible_notes,
+        ])
     return rows
 
 
@@ -209,9 +254,10 @@ def _export_csv_detail(sessions, output_path):
     click.echo(f"   明细: {len(rows)-1} 条记录")
 
 
-def _export_csv_summary(sessions, output_path, config):
+def _export_csv_summary(sessions, output_path, config, store_dir):
     stats = compute_statistics(sessions)
     watch = compute_priority_watch(sessions, config)
+    risk_events = load_risk_events(store_dir or None)
 
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
@@ -228,12 +274,12 @@ def _export_csv_summary(sessions, output_path, config):
             writer.writerow(row)
         writer.writerow([])
         writer.writerow(["=== 重点巡查清单 ==="])
-        for row in _collect_priority_watch_rows(watch):
+        for row in _collect_priority_watch_rows(watch, risk_events):
             writer.writerow(row)
     click.echo(f"   汇总: 台账明细 + 地块汇总 + 病害汇总 + 重点清单")
 
 
-def _export_xlsx(sessions, output_path, config):
+def _export_xlsx(sessions, output_path, config, store_dir):
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -245,6 +291,7 @@ def _export_xlsx(sessions, output_path, config):
 
     stats = compute_statistics(sessions)
     watch = compute_priority_watch(sessions, config)
+    risk_events = load_risk_events(store_dir or None)
     wb = Workbook()
 
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -270,7 +317,7 @@ def _export_xlsx(sessions, output_path, config):
     _write_sheet(ws_disease, _collect_disease_summary_rows(stats), header_fill, header_font, thin_border, disease_fill)
 
     ws_watch = wb.create_sheet("重点巡查清单")
-    watch_rows = _collect_priority_watch_rows(watch)
+    watch_rows = _collect_priority_watch_rows(watch, risk_events)
     _write_sheet(ws_watch, watch_rows, header_fill, header_font, thin_border, disease_fill, alert_fill)
 
     wb.save(output_path)

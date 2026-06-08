@@ -1,0 +1,28 @@
+[
+  {
+    "id": "077412f37d",
+    "plot_id": "A1",
+    "variety": "嘎啦",
+    "disease": "炭疽病",
+    "first_trigger_date": "2024-06-20",
+    "latest_trigger_date": "2024-06-20",
+    "trigger_count": 2,
+    "status": "已关闭",
+    "triggers": [
+      "发病率66.7%≥30.0%",
+      "面积占比6.33%≥5.0%"
+    ],
+    "treatment": "喷施咪鲜胺或苯醚甲环唑，重点喷果实和嫩梢；及时摘除病果。",
+    "incidence_rate": 66.7,
+    "area_pct": 6.33,
+    "growth": 0.0,
+    "risk_score": 114.33083333333333,
+    "recheck_date": "2024-06-27",
+    "confirm_date": "2026-06-08",
+    "confirm_notes": "已安排技术员现场确认",
+    "review_date": "",
+    "review_notes": "",
+    "close_date": "2026-06-08",
+    "responsible_notes": "已喷施苯醚甲环唑，7天后复查"
+  }
+]
